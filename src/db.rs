@@ -538,6 +538,69 @@ impl Database {
 
         Ok(task.flatten())
     }
+
+    pub fn delete_agents_by_names(&self, agent_names: &[String]) -> Result<usize> {
+        let mut removed = 0;
+        for agent_name in agent_names {
+            removed += self
+                .conn
+                .execute("DELETE FROM agents WHERE name = ?1", params![agent_name])?;
+        }
+        Ok(removed)
+    }
+
+    pub fn delete_tasks_by_ids(&self, task_ids: &[String]) -> Result<usize> {
+        let mut removed = 0;
+        for task_id in task_ids {
+            removed += self
+                .conn
+                .execute("DELETE FROM tasks WHERE id = ?1", params![task_id])?;
+        }
+        Ok(removed)
+    }
+
+    pub fn delete_task_events_by_task_ids(&self, task_ids: &[String]) -> Result<usize> {
+        let mut removed = 0;
+        for task_id in task_ids {
+            removed += self.conn.execute(
+                "DELETE FROM task_events WHERE task_id = ?1",
+                params![task_id],
+            )?;
+        }
+        Ok(removed)
+    }
+
+    pub fn delete_decisions_by_task_ids(&self, task_ids: &[String]) -> Result<usize> {
+        let mut removed = 0;
+        for task_id in task_ids {
+            removed += self
+                .conn
+                .execute("DELETE FROM decisions WHERE task_id = ?1", params![task_id])?;
+        }
+        Ok(removed)
+    }
+
+    pub fn delete_sessions_by_agent_names(&self, agent_names: &[String]) -> Result<usize> {
+        let mut removed = 0;
+        for agent_name in agent_names {
+            removed += self.conn.execute(
+                "DELETE FROM sessions WHERE agent_id = ?1",
+                params![agent_name],
+            )?;
+        }
+        Ok(removed)
+    }
+
+    pub fn delete_stream_events_by_agent_names(&self, agent_names: &[String]) -> Result<usize> {
+        let mut removed = 0;
+        for agent_name in agent_names {
+            removed += self.conn.execute(
+                "DELETE FROM stream_events WHERE agent_name = ?1",
+                params![agent_name],
+            )?;
+        }
+        Ok(removed)
+    }
 }
 
 fn serialize_role(role: &AgentRole) -> &'static str {

@@ -119,6 +119,27 @@ pub struct StreamEventRecord {
     pub at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CleanupSummary {
+    pub requested_by: String,
+    pub removed_agents: usize,
+    pub removed_tasks: usize,
+    pub removed_task_events: usize,
+    pub removed_decisions: usize,
+    pub removed_sessions: usize,
+    pub removed_stream_events: usize,
+    pub removed_agent_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepairSummary {
+    pub requested_by: String,
+    pub repaired_agents: usize,
+    pub repaired_tasks: usize,
+    pub repaired_sessions: usize,
+    pub notes: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskRoundStatus {

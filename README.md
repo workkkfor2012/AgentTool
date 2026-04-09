@@ -106,6 +106,18 @@ Run one structured task round:
 F:\work\github\AgentTool\target\debug\agentctl.exe run-task-round --task T-REPLACE-ME
 ```
 
+Clean up demo and probe records from the local runtime database:
+
+```powershell
+F:\work\github\AgentTool\target\debug\agentctl.exe cleanup-demo-data --requested-by main
+```
+
+Repair obvious runtime and SQLite inconsistencies conservatively:
+
+```powershell
+F:\work\github\AgentTool\target\debug\agentctl.exe repair-runtime-state --requested-by main
+```
+
 Cancel a task and release the child agent when no live session is attached:
 
 ```powershell
@@ -168,6 +180,8 @@ Blocked agents are now rejected for new task assignment and ad hoc rounds until 
 `cancel-task` now gives the main agent an explicit abort path for non-live tasks and releases the child agent back to `idle`.
 `retry-task` now reopens `failed` or `cancelled` tasks as `pending` and reassigns them to the original child agent when that agent is idle.
 `reset-agent-thread` now clears a persisted `thread_id` without touching SQLite manually, as long as the agent has no live session and no in-flight task.
+`cleanup-demo-data` now removes demo child agents, their related tasks, decisions, sessions, and stream records from SQLite and the in-memory runtime.
+`repair-runtime-state` now repairs obvious inconsistencies such as stale `current_session_id`, stale `current_task_id`, missing `closed_at`, and orphaned `running` sessions without a live handle.
 
 ## Task lifecycle
 
@@ -231,6 +245,8 @@ Supported status values:
 - `stop-agent-session` only works for a live session owned by the current `agentd` process. Recovered historical `running` records do not have a kill handle.
 - `recover-agent` only works when the agent has no in-flight task and no live session attached.
 - `reset-agent-thread` only works when the agent has no in-flight task and no live session attached.
+- `cleanup-demo-data` only targets built-in demo/probe agent names such as `demo_*` and `usage_limit_probe`.
+- `repair-runtime-state` is intentionally conservative and does not guess across multiple open tasks for the same agent.
 - If Codex account limits are hit, `run-task-round` now surfaces the upstream readable error message instead of a generic exit-code failure.
 - Historical demo data in SQLite may show older agent states created before the latest state-release fixes.
 

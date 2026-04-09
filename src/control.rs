@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::models::{
-    AgentRoundResult, AgentSummary, DashboardSnapshot, DecisionSummary, TaskRoundPayload,
-    TaskSummary,
+    AgentRoundResult, AgentSummary, CleanupSummary, DashboardSnapshot, DecisionSummary,
+    RepairSummary, TaskRoundPayload, TaskSummary,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -22,6 +22,12 @@ pub enum ControlRequest {
     },
     RunTaskRound {
         task_id: String,
+    },
+    CleanupDemoData {
+        requested_by: String,
+    },
+    RepairRuntimeState {
+        requested_by: String,
     },
     CancelTask {
         task_id: String,
@@ -99,6 +105,12 @@ pub enum ControlResponse {
     Pong,
     Snapshot {
         snapshot: DashboardSnapshot,
+    },
+    Cleanup {
+        summary: CleanupSummary,
+    },
+    Repair {
+        summary: RepairSummary,
     },
     Ack {
         message: String,

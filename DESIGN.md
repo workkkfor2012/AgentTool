@@ -174,6 +174,8 @@ Operational recovery rule:
 - a `failed` or `cancelled` task may be explicitly retried back to `pending`
 - a blocked child agent must still be recovered separately unless the task cancel path already released it
 - a persisted `thread_id` may be explicitly reset only when the agent has no in-flight task and no live session
+- demo and probe records may be explicitly cleaned out of SQLite and runtime memory when they are no longer useful
+- runtime repair only fixes obvious inconsistencies; it does not guess when multiple open tasks conflict
 
 ## 7. Structured task-round protocol
 
@@ -258,6 +260,7 @@ Current practical use:
 - Task cancellation is deliberately conservative and does not preempt a live Codex child process; stop the session first, then cancel or retry
 - Session stop currently works only for live sessions started by the current `agentd` process, not for recovered historical records
 - Agent recovery is intentionally conservative: it only unlocks a `blocked` agent that has no in-flight task and no live session
+- Demo cleanup intentionally targets only known demo/probe agent names instead of arbitrary pattern-driven bulk deletion
 - No stale-record cleanup command yet
 
 ## 12. Next implementation targets

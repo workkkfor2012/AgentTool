@@ -39,6 +39,14 @@ enum Command {
         #[arg(long)]
         task: String,
     },
+    CleanupDemoData {
+        #[arg(long)]
+        requested_by: String,
+    },
+    RepairRuntimeState {
+        #[arg(long)]
+        requested_by: String,
+    },
     CancelTask {
         #[arg(long)]
         task: String,
@@ -168,6 +176,12 @@ async fn main() -> Result<()> {
         },
         Command::RunAgentRound { agent, prompt } => ControlRequest::RunAgentRound { agent, prompt },
         Command::RunTaskRound { task } => ControlRequest::RunTaskRound { task_id: task },
+        Command::CleanupDemoData { requested_by } => {
+            ControlRequest::CleanupDemoData { requested_by }
+        }
+        Command::RepairRuntimeState { requested_by } => {
+            ControlRequest::RepairRuntimeState { requested_by }
+        }
         Command::CancelTask { task, requested_by } => ControlRequest::CancelTask {
             task_id: task,
             requested_by,

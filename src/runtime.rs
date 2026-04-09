@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -21,9 +21,10 @@ use crate::config::AppConfig;
 use crate::control::{ControlRequest, ControlResponse};
 use crate::db::Database;
 use crate::models::{
-    AgentRole, AgentRoundResult, AgentSessionState, AgentSummary, CodexSessionStatus,
-    DashboardEvent, DashboardSnapshot, DecisionSummary, SessionMode, SessionSummary,
-    StreamEventRecord, TaskRoundPayload, TaskRoundStatus, TaskState, TaskSummary, WsClientMessage,
+    AgentRole, AgentRoundResult, AgentSessionState, AgentSummary, CleanupSummary,
+    CodexSessionStatus, DashboardEvent, DashboardSnapshot, DecisionSummary, RepairSummary,
+    SessionMode, SessionSummary, StreamEventRecord, TaskRoundPayload, TaskRoundStatus, TaskState,
+    TaskSummary, WsClientMessage,
 };
 
 #[derive(Clone)]
@@ -376,6 +377,14 @@ async fn dispatch_control_request(
             Ok(ControlResponse::RoundResult { result })
         }
         ControlRequest::RunTaskRound { task_id } => run_task_round(&shared, &task_id).await,
+        ControlRequest::CleanupDemoData { requested_by } => {
+            let summary = cleanup_demo_data(&shared, &requested_by).await?;
+            Ok(ControlResponse::Cleanup { summary })
+        }
+        ControlRequest::RepairRuntimeState { requested_by } => {
+            let summary = repair_runtime_state(&shared, &requested_by).await?;
+            Ok(ControlResponse::Repair { summary })
+        }
         ControlRequest::CancelTask {
             task_id,
             requested_by,
@@ -763,6 +772,38 @@ async fn ensure_registered_agent(shared: &AppShared, agent_name: &str) -> Result
     Ok(())
 }
 
+fn is_task_terminal(state: &TaskState) -> bool {
+    matches!(
+        state,
+        TaskState::Closed | TaskState::Cancelled | TaskState::Failed
+    )
+}
+
+fn desired_agent_state_for_task(task: &TaskSummary) -> AgentSessionState {
+    match task.state {
+        TaskState::Pending | TaskState::Accepted | TaskState::Running | TaskState::Completed => {
+            AgentSessionState::Busy
+        }
+        TaskState::Reported
+        | TaskState::Analyzed
+        | TaskState::DecisionSent
+        | TaskState::BlockedWaitingDecision => AgentSessionState::Blocked,
+        TaskState::Closed | TaskState::Cancelled | TaskState::Failed => AgentSessionState::Idle,
+    }
+}
+
+fn is_demo_agent_name(agent_name: &str) -> bool {
+    agent_name.starts_with("demo_") || agent_name == "usage_limit_probe"
+}
+
+async fn broadcast_runtime_snapshot(shared: &AppShared) {
+    let snapshot = shared.state.read().await.snapshot();
+    shared
+        .events_tx
+        .send(DashboardEvent::Snapshot { snapshot })
+        .ok();
+}
+
 async fn run_task_round(shared: &AppShared, task_id: &str) -> Result<ControlResponse> {
     let task = {
         let state = shared.state.read().await;
@@ -956,6 +997,374 @@ async fn run_task_round(shared: &AppShared, task_id: &str) -> Result<ControlResp
         result: round,
         payload,
         decision,
+    })
+}
+
+async fn cleanup_demo_data(shared: &AppShared, requested_by: &str) -> Result<CleanupSummary> {
+    ensure_registered_agent(shared, requested_by).await?;
+
+    let (demo_agent_names, task_ids, live_agent_names) = {
+        let state = shared.state.read().await;
+        let demo_agent_names = state
+            .agents
+            .values()
+            .filter(|agent| is_demo_agent_name(&agent.name))
+            .map(|agent| agent.name.clone())
+            .collect::<Vec<_>>();
+        let demo_agent_set = demo_agent_names.iter().cloned().collect::<HashSet<_>>();
+        let task_ids = state
+            .tasks
+            .values()
+            .filter(|task| {
+                demo_agent_set.contains(&task.from_agent) || demo_agent_set.contains(&task.to_agent)
+            })
+            .map(|task| task.task_id.clone())
+            .collect::<Vec<_>>();
+        let live_agent_names = state
+            .agents
+            .values()
+            .filter(|agent| {
+                demo_agent_set.contains(&agent.name) && agent.current_session_id.is_some()
+            })
+            .map(|agent| agent.name.clone())
+            .collect::<Vec<_>>();
+        (demo_agent_names, task_ids, live_agent_names)
+    };
+
+    if !live_agent_names.is_empty() {
+        bail!(
+            "cleanup refused because demo agents still have live sessions: {}",
+            live_agent_names.join(", ")
+        );
+    }
+
+    if demo_agent_names.is_empty() && task_ids.is_empty() {
+        return Ok(CleanupSummary {
+            requested_by: requested_by.to_string(),
+            removed_agents: 0,
+            removed_tasks: 0,
+            removed_task_events: 0,
+            removed_decisions: 0,
+            removed_sessions: 0,
+            removed_stream_events: 0,
+            removed_agent_names: Vec::new(),
+        });
+    }
+
+    let summary = {
+        let db = shared.db.lock().expect("db mutex poisoned");
+        let removed_stream_events = db.delete_stream_events_by_agent_names(&demo_agent_names)?;
+        let removed_decisions = db.delete_decisions_by_task_ids(&task_ids)?;
+        let removed_task_events = db.delete_task_events_by_task_ids(&task_ids)?;
+        let removed_tasks = db.delete_tasks_by_ids(&task_ids)?;
+        let removed_sessions = db.delete_sessions_by_agent_names(&demo_agent_names)?;
+        let removed_agents = db.delete_agents_by_names(&demo_agent_names)?;
+
+        CleanupSummary {
+            requested_by: requested_by.to_string(),
+            removed_agents,
+            removed_tasks,
+            removed_task_events,
+            removed_decisions,
+            removed_sessions,
+            removed_stream_events,
+            removed_agent_names: demo_agent_names.clone(),
+        }
+    };
+
+    let demo_agent_set = demo_agent_names.iter().cloned().collect::<HashSet<_>>();
+    let task_id_set = task_ids.iter().cloned().collect::<HashSet<_>>();
+
+    {
+        let mut active = shared
+            .active_sessions
+            .lock()
+            .expect("active session mutex poisoned");
+        active.retain(|_, control| !demo_agent_set.contains(&control.agent_name));
+    }
+
+    {
+        let mut state = shared.state.write().await;
+        state
+            .agents
+            .retain(|agent_name, _| !demo_agent_set.contains(agent_name));
+        state.tasks.retain(|task_id, task| {
+            !task_id_set.contains(task_id)
+                && !demo_agent_set.contains(&task.from_agent)
+                && !demo_agent_set.contains(&task.to_agent)
+        });
+        state
+            .decisions
+            .retain(|_, decision| !task_id_set.contains(&decision.task_id));
+        state
+            .sessions
+            .retain(|_, session| !demo_agent_set.contains(&session.agent_name));
+        state
+            .recent_streams
+            .retain(|event| !demo_agent_set.contains(&event.agent));
+    }
+
+    record_stream_event(
+        shared,
+        requested_by,
+        "stdout",
+        &format!(
+            "[CLEANUP_DEMO_DATA] agents={} tasks={}",
+            summary.removed_agents, summary.removed_tasks
+        ),
+    )
+    .await?;
+    broadcast_runtime_snapshot(shared).await;
+
+    Ok(summary)
+}
+
+async fn repair_runtime_state(shared: &AppShared, requested_by: &str) -> Result<RepairSummary> {
+    ensure_registered_agent(shared, requested_by).await?;
+
+    let now = Utc::now();
+    let active_session_ids = {
+        let active = shared
+            .active_sessions
+            .lock()
+            .expect("active session mutex poisoned");
+        active.keys().cloned().collect::<HashSet<_>>()
+    };
+
+    let (mut agents, mut tasks, decisions, mut sessions, recent_streams) = {
+        let state = shared.state.read().await;
+        (
+            state.agents.clone(),
+            state.tasks.clone(),
+            state.decisions.clone(),
+            state.sessions.clone(),
+            state.recent_streams.clone(),
+        )
+    };
+
+    let mut repaired_agents = HashSet::new();
+    let mut repaired_tasks = HashSet::new();
+    let mut repaired_sessions = HashSet::new();
+    let mut notes = Vec::new();
+
+    for task in tasks.values_mut() {
+        let mut changed = false;
+        let original_state = task.state.clone();
+
+        if is_task_terminal(&task.state) && task.closed_at.is_none() {
+            task.closed_at = Some(task.updated_at);
+            changed = true;
+            notes.push(format!(
+                "task {} had terminal state {:?} without closed_at; backfilled closed_at",
+                task.task_id, original_state
+            ));
+        } else if !is_task_terminal(&task.state) && task.closed_at.is_some() {
+            task.closed_at = None;
+            changed = true;
+            notes.push(format!(
+                "task {} was non-terminal {:?} but had closed_at; cleared it",
+                task.task_id, original_state
+            ));
+        }
+
+        if changed {
+            task.updated_at = now;
+            let db = shared.db.lock().expect("db mutex poisoned");
+            db.update_task(task)?;
+            db.insert_task_event(
+                &task.task_id,
+                "task_repaired",
+                Some(original_state.clone()),
+                Some(original_state),
+                "{}",
+            )?;
+            repaired_tasks.insert(task.task_id.clone());
+        }
+    }
+
+    for session in sessions.values_mut() {
+        let mut changed = false;
+
+        if session.status == CodexSessionStatus::Running
+            && !active_session_ids.contains(&session.session_id)
+        {
+            session.status = CodexSessionStatus::Failed;
+            if session.ended_at.is_none() {
+                session.ended_at = Some(now);
+            }
+            if session.last_output_at.is_none() {
+                session.last_output_at = Some(now);
+            }
+            changed = true;
+            notes.push(format!(
+                "session {} was marked running without a live handle; normalized to failed",
+                session.session_id
+            ));
+        } else if session.status != CodexSessionStatus::Running && session.ended_at.is_none() {
+            session.ended_at = Some(session.last_output_at.unwrap_or(now));
+            changed = true;
+            notes.push(format!(
+                "session {} was finished but missing ended_at; backfilled it",
+                session.session_id
+            ));
+        } else if session.status == CodexSessionStatus::Running
+            && session.ended_at.is_some()
+            && active_session_ids.contains(&session.session_id)
+        {
+            session.ended_at = None;
+            changed = true;
+            notes.push(format!(
+                "session {} was running but had ended_at set; cleared it",
+                session.session_id
+            ));
+        }
+
+        if changed {
+            let db = shared.db.lock().expect("db mutex poisoned");
+            db.upsert_session(session)?;
+            repaired_sessions.insert(session.session_id.clone());
+        }
+    }
+
+    let mut open_tasks_by_agent: HashMap<String, Vec<String>> = HashMap::new();
+    for task in tasks.values() {
+        if !is_task_terminal(&task.state) {
+            open_tasks_by_agent
+                .entry(task.to_agent.clone())
+                .or_default()
+                .push(task.task_id.clone());
+        }
+    }
+
+    for agent in agents.values_mut() {
+        let original_task_id = agent.current_task_id.clone();
+        let original_session_id = agent.current_session_id.clone();
+        let original_state = agent.state.clone();
+        let mut changed = false;
+
+        if let Some(session_id) = agent.current_session_id.clone() {
+            let valid_running_session = sessions
+                .get(&session_id)
+                .map(|session| session.status == CodexSessionStatus::Running)
+                .unwrap_or(false);
+            if !valid_running_session {
+                agent.current_session_id = None;
+                changed = true;
+                notes.push(format!(
+                    "agent {} referenced stale current_session_id {}; cleared it",
+                    agent.name, session_id
+                ));
+            }
+        }
+
+        if let Some(task_id) = agent.current_task_id.clone() {
+            let valid_open_task = tasks
+                .get(&task_id)
+                .map(|task| !is_task_terminal(&task.state))
+                .unwrap_or(false);
+            if !valid_open_task {
+                agent.current_task_id = None;
+                changed = true;
+                notes.push(format!(
+                    "agent {} referenced stale current_task_id {}; cleared it",
+                    agent.name, task_id
+                ));
+            }
+        }
+
+        if agent.current_task_id.is_none() && agent.current_session_id.is_none() {
+            let open_task_ids = open_tasks_by_agent
+                .get(&agent.name)
+                .cloned()
+                .unwrap_or_default();
+            if open_task_ids.len() == 1 {
+                let rebound_task_id = open_task_ids[0].clone();
+                agent.current_task_id = Some(rebound_task_id.clone());
+                if let Some(task) = tasks.get(&rebound_task_id) {
+                    agent.state = desired_agent_state_for_task(task);
+                }
+                changed = true;
+                notes.push(format!(
+                    "agent {} had exactly one open task {}; rebound current_task_id",
+                    agent.name, rebound_task_id
+                ));
+            } else if open_task_ids.is_empty() && agent.state == AgentSessionState::Busy {
+                agent.state = AgentSessionState::Idle;
+                changed = true;
+                notes.push(format!(
+                    "agent {} was busy without task or session; normalized to idle",
+                    agent.name
+                ));
+            } else if open_task_ids.len() > 1 {
+                notes.push(format!(
+                    "agent {} has {} open tasks and was not auto-repaired",
+                    agent.name,
+                    open_task_ids.len()
+                ));
+            }
+        } else if agent.current_session_id.is_some() && agent.state != AgentSessionState::Busy {
+            agent.state = AgentSessionState::Busy;
+            changed = true;
+            notes.push(format!(
+                "agent {} had a live session but state {:?}; normalized to busy",
+                agent.name, original_state
+            ));
+        } else if let Some(task_id) = &agent.current_task_id
+            && let Some(task) = tasks.get(task_id)
+        {
+            let desired_state = desired_agent_state_for_task(task);
+            if agent.current_session_id.is_none() && agent.state != desired_state {
+                agent.state = desired_state.clone();
+                changed = true;
+                notes.push(format!(
+                    "agent {} state {:?} did not match task {}; normalized to {:?}",
+                    agent.name, original_state, task_id, desired_state
+                ));
+            }
+        }
+
+        if changed {
+            if original_task_id != agent.current_task_id
+                || original_session_id != agent.current_session_id
+                || original_state != agent.state
+            {
+                agent.last_heartbeat_at = Some(now);
+            }
+            let db = shared.db.lock().expect("db mutex poisoned");
+            db.upsert_agent(agent)?;
+            repaired_agents.insert(agent.name.clone());
+        }
+    }
+
+    {
+        let mut state = shared.state.write().await;
+        state.agents = agents;
+        state.tasks = tasks;
+        state.decisions = decisions;
+        state.sessions = sessions;
+        state.recent_streams = recent_streams;
+    }
+
+    record_stream_event(
+        shared,
+        requested_by,
+        "stdout",
+        &format!(
+            "[REPAIR_RUNTIME_STATE] agents={} tasks={} sessions={}",
+            repaired_agents.len(),
+            repaired_tasks.len(),
+            repaired_sessions.len()
+        ),
+    )
+    .await?;
+    broadcast_runtime_snapshot(shared).await;
+
+    Ok(RepairSummary {
+        requested_by: requested_by.to_string(),
+        repaired_agents: repaired_agents.len(),
+        repaired_tasks: repaired_tasks.len(),
+        repaired_sessions: repaired_sessions.len(),
+        notes,
     })
 }
 
