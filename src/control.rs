@@ -23,6 +23,14 @@ pub enum ControlRequest {
     RunTaskRound {
         task_id: String,
     },
+    CancelTask {
+        task_id: String,
+        requested_by: String,
+    },
+    RetryTask {
+        task_id: String,
+        requested_by: String,
+    },
     RecoverAgent {
         agent: String,
     },

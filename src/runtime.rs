@@ -376,6 +376,20 @@ async fn dispatch_control_request(
             Ok(ControlResponse::RoundResult { result })
         }
         ControlRequest::RunTaskRound { task_id } => run_task_round(&shared, &task_id).await,
+        ControlRequest::CancelTask {
+            task_id,
+            requested_by,
+        } => {
+            let task = cancel_task(&shared, &task_id, &requested_by).await?;
+            Ok(ControlResponse::Task { task })
+        }
+        ControlRequest::RetryTask {
+            task_id,
+            requested_by,
+        } => {
+            let task = retry_task(&shared, &task_id, &requested_by).await?;
+            Ok(ControlResponse::Task { task })
+        }
         ControlRequest::RecoverAgent { agent } => {
             let agent = recover_agent(&shared, &agent).await?;
             Ok(ControlResponse::Agent { agent })
@@ -450,9 +464,7 @@ async fn dispatch_control_request(
                 let mut state = shared.state.write().await;
                 state.tasks.insert(task.task_id.clone(), task.clone());
                 if let Some(agent) = state.agents.get_mut(&to_agent) {
-                    agent.current_task_id = Some(task.task_id.clone());
-                    agent.state = AgentSessionState::Busy;
-                    agent.last_output_at = Some(Utc::now());
+                    claim_task_for_agent_summary(agent, &task.task_id);
                     changed_agent = Some(agent.clone());
                 }
             }
@@ -710,6 +722,13 @@ fn ensure_agent_ready_for_ad_hoc_round(agent: &AgentSummary) -> Result<()> {
     Ok(())
 }
 
+fn claim_task_for_agent_summary(agent: &mut AgentSummary, task_id: &str) {
+    agent.current_task_id = Some(task_id.to_string());
+    agent.state = AgentSessionState::Busy;
+    agent.last_output_at = Some(Utc::now());
+    agent.last_heartbeat_at = Some(Utc::now());
+}
+
 fn ensure_agent_ready_for_task_round(agent: &AgentSummary, task_id: &str) -> Result<()> {
     if agent.current_task_id.as_deref() != Some(task_id) {
         bail!(
@@ -728,6 +747,14 @@ fn ensure_agent_ready_for_task_round(agent: &AgentSummary, task_id: &str) -> Res
             task_id,
             agent.state
         );
+    }
+    Ok(())
+}
+
+async fn ensure_registered_agent(shared: &AppShared, agent_name: &str) -> Result<()> {
+    let state = shared.state.read().await;
+    if !state.agents.contains_key(agent_name) {
+        bail!("agent not registered: {agent_name}");
     }
     Ok(())
 }
@@ -926,6 +953,193 @@ async fn run_task_round(shared: &AppShared, task_id: &str) -> Result<ControlResp
         payload,
         decision,
     })
+}
+
+async fn cancel_task(shared: &AppShared, task_id: &str, requested_by: &str) -> Result<TaskSummary> {
+    ensure_registered_agent(shared, requested_by).await?;
+
+    let task = {
+        let state = shared.state.read().await;
+        state
+            .tasks
+            .get(task_id)
+            .cloned()
+            .ok_or_else(|| anyhow!("task not found: {task_id}"))?
+    };
+
+    let assigned_agent = {
+        let state = shared.state.read().await;
+        state.agents.get(&task.to_agent).cloned()
+    };
+
+    if let Some(agent) = &assigned_agent
+        && agent.current_task_id.as_deref() == Some(task_id)
+        && agent.current_session_id.is_some()
+    {
+        bail!(
+            "task {task_id} has a live session attached on agent {}; stop-agent-session first",
+            agent.name
+        );
+    }
+
+    let cancelled = transition_any_of(
+        shared,
+        task_id,
+        &[
+            TaskState::Pending,
+            TaskState::Accepted,
+            TaskState::Running,
+            TaskState::Completed,
+            TaskState::Reported,
+            TaskState::Analyzed,
+            TaskState::BlockedWaitingDecision,
+        ],
+        TaskState::Cancelled,
+        "task_cancelled",
+    )
+    .await?;
+
+    if let Some(agent) = assigned_agent
+        && agent.current_task_id.as_deref() == Some(task_id)
+    {
+        release_agent_after_terminal_task(shared, &agent.name, AgentSessionState::Idle).await?;
+    }
+
+    let payload = serde_json::json!({ "requested_by": requested_by });
+    {
+        let db = shared.db.lock().expect("db mutex poisoned");
+        db.insert_task_event(
+            &cancelled.task_id,
+            "task_cancel_payload",
+            Some(TaskState::Cancelled),
+            Some(TaskState::Cancelled),
+            &payload.to_string(),
+        )?;
+    }
+
+    record_stream_event(
+        shared,
+        requested_by,
+        "stdout",
+        &format!("[TASK_CANCEL] task={task_id}"),
+    )
+    .await?;
+
+    Ok(cancelled)
+}
+
+async fn retry_task(shared: &AppShared, task_id: &str, requested_by: &str) -> Result<TaskSummary> {
+    ensure_registered_agent(shared, requested_by).await?;
+
+    let task = {
+        let state = shared.state.read().await;
+        state
+            .tasks
+            .get(task_id)
+            .cloned()
+            .ok_or_else(|| anyhow!("task not found: {task_id}"))?
+    };
+
+    if !matches!(task.state, TaskState::Failed | TaskState::Cancelled) {
+        bail!(
+            "task {task_id} must be failed or cancelled before retry, actual {:?}",
+            task.state
+        );
+    }
+
+    let agent = {
+        let state = shared.state.read().await;
+        state
+            .agents
+            .get(&task.to_agent)
+            .cloned()
+            .ok_or_else(|| anyhow!("target agent not registered: {}", task.to_agent))?
+    };
+    ensure_agent_ready_for_new_task(&agent)?;
+
+    let retried = reopen_task_as_pending(shared, &task, "task_retried").await?;
+
+    let mut changed_agent = None;
+    {
+        let mut state = shared.state.write().await;
+        if let Some(agent) = state.agents.get_mut(&task.to_agent) {
+            claim_task_for_agent_summary(agent, &task.task_id);
+            changed_agent = Some(agent.clone());
+        }
+    }
+
+    if let Some(agent) = changed_agent {
+        let db = shared.db.lock().expect("db mutex poisoned");
+        db.upsert_agent(&agent)?;
+        shared
+            .events_tx
+            .send(DashboardEvent::AgentStateChanged { agent })
+            .ok();
+    }
+
+    let payload = serde_json::json!({ "requested_by": requested_by });
+    {
+        let db = shared.db.lock().expect("db mutex poisoned");
+        db.insert_task_event(
+            &retried.task_id,
+            "task_retry_payload",
+            Some(TaskState::Pending),
+            Some(TaskState::Pending),
+            &payload.to_string(),
+        )?;
+    }
+
+    record_stream_event(
+        shared,
+        requested_by,
+        "stdout",
+        &format!(
+            "[TASK_RETRY] task={} target={}",
+            retried.task_id, retried.to_agent
+        ),
+    )
+    .await?;
+
+    Ok(retried)
+}
+
+async fn reopen_task_as_pending(
+    shared: &AppShared,
+    task: &TaskSummary,
+    event_type: &str,
+) -> Result<TaskSummary> {
+    let mut updated = task.clone();
+    let from_state = updated.state.clone();
+    updated.state = TaskState::Pending;
+    updated.updated_at = Utc::now();
+    updated.closed_at = None;
+
+    {
+        let db = shared.db.lock().expect("db mutex poisoned");
+        db.update_task(&updated)?;
+        db.insert_task_event(
+            &updated.task_id,
+            event_type,
+            Some(from_state),
+            Some(TaskState::Pending),
+            "{}",
+        )?;
+    }
+
+    {
+        let mut state = shared.state.write().await;
+        state.tasks.insert(updated.task_id.clone(), updated.clone());
+    }
+
+    shared
+        .events_tx
+        .send(DashboardEvent::TaskEvent {
+            task: updated.clone(),
+            event_type: event_type.to_string(),
+        })
+        .ok();
+
+    Ok(updated)
 }
 
 fn compose_task_prompt(task: &TaskSummary) -> String {

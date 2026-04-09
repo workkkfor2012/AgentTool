@@ -106,6 +106,18 @@ Run one structured task round:
 F:\work\github\AgentTool\target\debug\agentctl.exe run-task-round --task T-REPLACE-ME
 ```
 
+Cancel a task and release the child agent when no live session is attached:
+
+```powershell
+F:\work\github\AgentTool\target\debug\agentctl.exe cancel-task --task T-REPLACE-ME --requested-by main
+```
+
+Retry a failed or cancelled task on its original child agent:
+
+```powershell
+F:\work\github\AgentTool\target\debug\agentctl.exe retry-task --task T-REPLACE-ME --requested-by main
+```
+
 Stop the current live session for an agent:
 
 ```powershell
@@ -147,6 +159,8 @@ F:\work\github\AgentTool\target\debug\agentctl.exe close-task --task T-REPLACE-M
 `close-task` now auto-acknowledges the latest pending decision for that task before releasing the child agent.
 `run-task-round` now auto-resolves `report` and `wait_decision` tasks when the task was created with both `--auto-resolve-by` and `--auto-resolve-summary`.
 Blocked agents are now rejected for new task assignment and ad hoc rounds until they are explicitly recovered.
+`cancel-task` now gives the main agent an explicit abort path for non-live tasks and releases the child agent back to `idle`.
+`retry-task` now reopens `failed` or `cancelled` tasks as `pending` and reassigns them to the original child agent when that agent is idle.
 
 ## Task lifecycle
 
@@ -206,6 +220,7 @@ Supported status values:
 
 - The current Codex backend is round-based, not PTY-based.
 - `src/backend.rs` already has the PTY dispatch point, but it currently returns `pty backend not implemented yet`.
+- `cancel-task` refuses to touch a task that still has a live session attached; use `stop-agent-session` first.
 - `stop-agent-session` only works for a live session owned by the current `agentd` process. Recovered historical `running` records do not have a kill handle.
 - `recover-agent` only works when the agent has no in-flight task and no live session attached.
 - If Codex account limits are hit, `run-task-round` now surfaces the upstream readable error message instead of a generic exit-code failure.

@@ -39,6 +39,18 @@ enum Command {
         #[arg(long)]
         task: String,
     },
+    CancelTask {
+        #[arg(long)]
+        task: String,
+        #[arg(long)]
+        requested_by: String,
+    },
+    RetryTask {
+        #[arg(long)]
+        task: String,
+        #[arg(long)]
+        requested_by: String,
+    },
     RecoverAgent {
         #[arg(long)]
         agent: String,
@@ -152,6 +164,14 @@ async fn main() -> Result<()> {
         },
         Command::RunAgentRound { agent, prompt } => ControlRequest::RunAgentRound { agent, prompt },
         Command::RunTaskRound { task } => ControlRequest::RunTaskRound { task_id: task },
+        Command::CancelTask { task, requested_by } => ControlRequest::CancelTask {
+            task_id: task,
+            requested_by,
+        },
+        Command::RetryTask { task, requested_by } => ControlRequest::RetryTask {
+            task_id: task,
+            requested_by,
+        },
         Command::RecoverAgent { agent } => ControlRequest::RecoverAgent { agent },
         Command::StopAgentSession { agent } => ControlRequest::StopAgentSession { agent },
         Command::CreateTask {

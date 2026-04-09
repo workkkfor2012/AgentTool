@@ -169,6 +169,11 @@ The critical rule is:
 
 - a child agent is not available for another task until the current task reaches `closed`
 
+Operational recovery rule:
+
+- a `failed` or `cancelled` task may be explicitly retried back to `pending`
+- a blocked child agent must still be recovered separately unless the task cancel path already released it
+
 ## 7. Structured task-round protocol
 
 `run-task-round` requires the child agent to return exactly one JSON object matching:
@@ -249,6 +254,7 @@ Current practical use:
 - No PTY-controlled long-lived Codex sessions yet
 - No dashboard action buttons yet
 - No richer policy engine beyond per-task auto resolution yet
+- Task cancellation is deliberately conservative and does not preempt a live Codex child process; stop the session first, then cancel or retry
 - Session stop currently works only for live sessions started by the current `agentd` process, not for recovered historical records
 - Agent recovery is intentionally conservative: it only unlocks a `blocked` agent that has no in-flight task and no live session
 - No stale-record cleanup command yet
