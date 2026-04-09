@@ -97,6 +97,7 @@ Responsibilities:
 
 Responsibilities:
 
+- surface live communication state for open tasks between the main agent and child agents
 - render current agents, tasks, decisions, and sessions
 - show recent stream activity
 - provide read-only filters for active-only view, stderr hiding, and text search
@@ -259,6 +260,7 @@ Current practical use:
 - No PTY-controlled long-lived Codex sessions yet
 - Dashboard remains intentionally read-only; it exposes filters and inspection only
 - No richer policy engine beyond per-task auto resolution yet
+- History replay is not a current product goal; realtime communication state takes priority
 - Task cancellation is deliberately conservative and does not preempt a live Codex child process; stop the session first, then cancel or retry
 - Session stop currently works only for live sessions started by the current `agentd` process, not for recovered historical records
 - Agent recovery is intentionally conservative: it only unlocks a `blocked` agent that has no in-flight task and no live session

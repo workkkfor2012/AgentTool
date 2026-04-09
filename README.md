@@ -215,6 +215,7 @@ The dashboard connects to:
 
 It renders:
 
+- live communication state for open tasks between the main agent and child agents
 - agents
 - tasks
 - decisions
@@ -225,6 +226,7 @@ It renders:
 
 The initial snapshot now includes `sessions` and `recent_streams`, so the page does not need to wait for new log lines before showing context.
 Agents also expose their `current_session_id`, so the dashboard can show which live session is attached to which agent.
+The dashboard now emphasizes live communication flow for open tasks instead of building a history replay workflow.
 
 ## Structured task rounds
 

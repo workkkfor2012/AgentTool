@@ -976,10 +976,7 @@ async fn run_task_round(shared: &AppShared, task_id: &str) -> Result<ControlResp
     )
     .await?;
 
-    let next_agent_state = match payload.status {
-        TaskRoundStatus::Result => AgentSessionState::Busy,
-        TaskRoundStatus::Report | TaskRoundStatus::WaitDecision => AgentSessionState::Blocked,
-    };
+    let next_agent_state = desired_agent_state_for_task(&final_task);
     update_agent_after_round(
         shared,
         &task.to_agent,
@@ -2641,10 +2638,11 @@ async fn transition_impl(
 #[cfg(test)]
 mod tests {
     use super::{
-        ensure_agent_ready_for_ad_hoc_round, ensure_agent_ready_for_new_task,
-        ensure_agent_ready_for_task_round,
+        desired_agent_state_for_task, ensure_agent_ready_for_ad_hoc_round,
+        ensure_agent_ready_for_new_task, ensure_agent_ready_for_task_round,
     };
-    use crate::models::{AgentRole, AgentSessionState, AgentSummary};
+    use crate::models::{AgentRole, AgentSessionState, AgentSummary, TaskState, TaskSummary};
+    use chrono::Utc;
 
     fn sample_agent() -> AgentSummary {
         AgentSummary {
@@ -2658,6 +2656,22 @@ mod tests {
             current_task_id: None,
             last_output_at: None,
             last_heartbeat_at: None,
+        }
+    }
+
+    fn sample_task(state: TaskState) -> TaskSummary {
+        TaskSummary {
+            task_id: "T-1".to_string(),
+            from_agent: "main".to_string(),
+            to_agent: "child".to_string(),
+            title: "demo".to_string(),
+            summary: "demo".to_string(),
+            auto_resolve_by: None,
+            auto_resolve_summary: None,
+            state,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            closed_at: None,
         }
     }
 
@@ -2693,5 +2707,18 @@ mod tests {
 
         let err = ensure_agent_ready_for_task_round(&agent, "T-2").unwrap_err();
         assert!(err.to_string().contains("not currently assigned"));
+    }
+
+    #[test]
+    fn reported_like_task_states_block_the_agent() {
+        for task_state in [
+            TaskState::Reported,
+            TaskState::Analyzed,
+            TaskState::DecisionSent,
+            TaskState::BlockedWaitingDecision,
+        ] {
+            let task = sample_task(task_state);
+            assert_eq!(desired_agent_state_for_task(&task), AgentSessionState::Blocked);
+        }
     }
 }

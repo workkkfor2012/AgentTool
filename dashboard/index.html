@@ -480,6 +480,27 @@
       <div id="inspector"></div>
     </section>
 
+    <section class="panel filter-panel">
+      <div class="section-head">
+        <h2>Live Communications <span id="communications-count" class="count"></span></h2>
+        <p class="section-copy">Current task handoff state between the main agent and child agents. This view stays focused on live work, not history replay.</p>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>Task</th>
+            <th>Phase</th>
+            <th>Waiting On</th>
+            <th>Child</th>
+            <th>Session</th>
+            <th>Decision</th>
+            <th>Updated</th>
+          </tr>
+        </thead>
+        <tbody id="communications-body"></tbody>
+      </table>
+    </section>
+
     <div class="grid">
       <div class="stack">
         <section class="panel">
@@ -591,6 +612,7 @@
     const tasksBody = document.getElementById("tasks-body");
     const decisionsBody = document.getElementById("decisions-body");
     const sessionsBody = document.getElementById("sessions-body");
+    const communicationsBody = document.getElementById("communications-body");
     const streamsBox = document.getElementById("streams");
     const inspectorBox = document.getElementById("inspector");
     const connDot = document.getElementById("conn-dot");
@@ -602,6 +624,7 @@
     const hideStderrInput = document.getElementById("hide-stderr");
     const searchInput = document.getElementById("search-input");
     const agentsCount = document.getElementById("agents-count");
+    const communicationsCount = document.getElementById("communications-count");
     const tasksCount = document.getElementById("tasks-count");
     const decisionsCount = document.getElementById("decisions-count");
     const sessionsCount = document.getElementById("sessions-count");
@@ -747,6 +770,125 @@
           .filter((session) => sessionIsActive(session))
           .map((session) => session.session_id)
       );
+    }
+
+    function latestDecisionForTask(taskId) {
+      return [...state.decisions.values()]
+        .filter((decision) => decision.task_id === taskId)
+        .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))[0] || null;
+    }
+
+    function sessionForTask(task, agent) {
+      if (!agent || agent.current_task_id !== task.task_id || !agent.current_session_id) {
+        return null;
+      }
+
+      return state.sessions.get(agent.current_session_id) || null;
+    }
+
+    function communicationPhase(task, agent, session, decision) {
+      switch (task.state) {
+        case "pending":
+          return {
+            phase: "queued",
+            waitingOn: "child",
+            note: "Task is queued for the child agent to start.",
+          };
+        case "accepted":
+          return {
+            phase: "accepted",
+            waitingOn: session ? "child" : "system",
+            note: session ? "Child accepted the task and has a live session." : "Task was accepted but no live session is attached yet.",
+          };
+        case "running":
+          return {
+            phase: "child_running",
+            waitingOn: "child",
+            note: session ? "Child is executing the task." : "Task is marked running but there is no live session attached.",
+          };
+        case "completed":
+          return {
+            phase: "child_finishing",
+            waitingOn: "system",
+            note: "Child completed the execution round and the runtime is finalizing the handoff.",
+          };
+        case "reported":
+          return {
+            phase: "awaiting_main_review",
+            waitingOn: "main",
+            note: "Child reported back and the main agent has not resolved it yet.",
+          };
+        case "blocked_waiting_decision":
+          return {
+            phase: "awaiting_main_decision",
+            waitingOn: "main",
+            note: "Child explicitly stopped and is waiting for a main-agent decision.",
+          };
+        case "analyzed":
+          return {
+            phase: "decision_ready",
+            waitingOn: "main",
+            note: "Main agent analyzed the task and can now issue a decision.",
+          };
+        case "decision_sent":
+          return {
+            phase: decision?.status === "acknowledged" ? "decision_acknowledged" : "decision_sent",
+            waitingOn: decision?.status === "acknowledged" ? "system" : "child",
+            note: decision?.status === "acknowledged"
+              ? "Decision was acknowledged and the runtime is finishing closure."
+              : "Main agent sent a decision to the child side.",
+          };
+        case "failed":
+          return {
+            phase: "failed",
+            waitingOn: "main",
+            note: "Task failed and needs operator or main-agent follow-up.",
+          };
+        case "cancelled":
+          return {
+            phase: "cancelled",
+            waitingOn: "none",
+            note: "Task was cancelled.",
+          };
+        case "closed":
+          return {
+            phase: "closed",
+            waitingOn: "none",
+            note: "Task is fully closed.",
+          };
+        default:
+          return {
+            phase: String(task.state || "unknown"),
+            waitingOn: agent?.state === "busy" ? "child" : "main",
+            note: "Task is in an unclassified runtime state.",
+          };
+      }
+    }
+
+    function liveCommunications() {
+      return [...state.tasks.values()]
+        .filter((task) => !isTaskTerminal(task))
+        .map((task) => {
+          const agent = state.agents.get(task.to_agent) || null;
+          const session = sessionForTask(task, agent);
+          const decision = latestDecisionForTask(task.task_id);
+          const phase = communicationPhase(task, agent, session, decision);
+          return { task, agent, session, decision, ...phase };
+        })
+        .filter((item) => matchesSearch([
+          item.task.task_id,
+          item.task.title,
+          item.task.summary,
+          item.task.from_agent,
+          item.task.to_agent,
+          item.phase,
+          item.waitingOn,
+          item.note,
+          item.decision?.summary,
+          item.decision?.status,
+          item.session?.session_id,
+        ]))
+        .sort((a, b) => String(b.task.updated_at).localeCompare(String(a.task.updated_at)));
     }
 
     function filteredAgents() {
@@ -1026,6 +1168,41 @@
       `;
     }
 
+    function renderCommunications() {
+      const visible = liveCommunications();
+      const rows = visible
+        .map((item) => `
+          <tr ${interactiveAttrs("task", item.task.task_id)}>
+            <td>
+              <div class="mono">${esc(item.task.task_id)}</div>
+              <div>${esc(item.task.title)}</div>
+            </td>
+            <td>
+              <div class="mono">${esc(item.phase)}</div>
+              <div class="meta">${esc(item.note)}</div>
+            </td>
+            <td class="mono">${esc(item.waitingOn)}</td>
+            <td>
+              <div class="mono">${esc(item.task.to_agent)}</div>
+              <div class="${stateClass(item.agent?.state)}">${esc(item.agent?.state || "-")}</div>
+            </td>
+            <td>
+              <div class="mono">${esc(item.session?.session_id || "-")}</div>
+              <div class="${stateClass(item.session?.status)}">${esc(item.session?.status || "-")}</div>
+            </td>
+            <td>
+              <div class="mono">${esc(item.decision?.decision_id || "-")}</div>
+              <div class="${stateClass(item.decision?.status)}">${esc(item.decision?.status || "-")}</div>
+            </td>
+            <td>${fmtTime(item.task.updated_at)}</td>
+          </tr>
+        `)
+        .join("");
+
+      communicationsCount.textContent = String(visible.length);
+      communicationsBody.innerHTML = rows || emptyRow(7, "No live communications right now");
+    }
+
     function renderAgents() {
       const all = [...state.agents.values()];
       const visible = filteredAgents();
@@ -1131,6 +1308,7 @@
     function renderAll() {
       ensureSelectionValid();
       renderInspector();
+      renderCommunications();
       renderAgents();
       renderTasks();
       renderDecisions();
@@ -1267,6 +1445,7 @@
     });
 
     agentsBody.addEventListener("click", handleSelectableClick);
+    communicationsBody.addEventListener("click", handleSelectableClick);
     tasksBody.addEventListener("click", handleSelectableClick);
     decisionsBody.addEventListener("click", handleSelectableClick);
     sessionsBody.addEventListener("click", handleSelectableClick);
