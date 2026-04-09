@@ -23,6 +23,9 @@ pub enum ControlRequest {
     RunTaskRound {
         task_id: String,
     },
+    RecoverAgent {
+        agent: String,
+    },
     StopAgentSession {
         agent: String,
     },

@@ -39,6 +39,10 @@ enum Command {
         #[arg(long)]
         task: String,
     },
+    RecoverAgent {
+        #[arg(long)]
+        agent: String,
+    },
     StopAgentSession {
         #[arg(long)]
         agent: String,
@@ -148,6 +152,7 @@ async fn main() -> Result<()> {
         },
         Command::RunAgentRound { agent, prompt } => ControlRequest::RunAgentRound { agent, prompt },
         Command::RunTaskRound { task } => ControlRequest::RunTaskRound { task_id: task },
+        Command::RecoverAgent { agent } => ControlRequest::RecoverAgent { agent },
         Command::StopAgentSession { agent } => ControlRequest::StopAgentSession { agent },
         Command::CreateTask {
             from,

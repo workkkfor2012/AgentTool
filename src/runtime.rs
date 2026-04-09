@@ -376,6 +376,10 @@ async fn dispatch_control_request(
             Ok(ControlResponse::RoundResult { result })
         }
         ControlRequest::RunTaskRound { task_id } => run_task_round(&shared, &task_id).await,
+        ControlRequest::RecoverAgent { agent } => {
+            let agent = recover_agent(&shared, &agent).await?;
+            Ok(ControlResponse::Agent { agent })
+        }
         ControlRequest::StopAgentSession { agent } => {
             let session_id = stop_agent_session(&shared, &agent).await?;
             Ok(ControlResponse::Ack {
@@ -399,9 +403,7 @@ async fn dispatch_control_request(
                     .get(&to_agent)
                     .ok_or_else(|| anyhow!("target agent not registered: {to_agent}"))?;
 
-                if target.current_task_id.is_some() {
-                    bail!("target agent {to_agent} already has an in-flight task");
-                }
+                ensure_agent_ready_for_new_task(target)?;
 
                 match (&auto_resolve_by, &auto_resolve_summary) {
                     (Some(analyzer), Some(_)) => {
@@ -607,9 +609,7 @@ async fn run_agent_round(
             .ok_or_else(|| anyhow!("agent not registered: {agent_name}"))?
     };
 
-    if agent.current_task_id.is_some() {
-        bail!("agent {agent_name} has an in-flight task and cannot run an ad hoc round");
-    }
+    ensure_agent_ready_for_ad_hoc_round(&agent)?;
 
     set_agent_runtime_state(shared, agent_name, AgentSessionState::Busy).await?;
 
@@ -670,6 +670,68 @@ async fn run_agent_round(
     }
 }
 
+fn ensure_agent_ready_for_new_task(agent: &AgentSummary) -> Result<()> {
+    if agent.current_task_id.is_some() {
+        bail!("target agent {} already has an in-flight task", agent.name);
+    }
+    if agent.current_session_id.is_some() {
+        bail!(
+            "target agent {} already has a live session attached",
+            agent.name
+        );
+    }
+    if agent.state != AgentSessionState::Idle {
+        bail!(
+            "target agent {} must be idle before receiving a new task, actual {:?}",
+            agent.name,
+            agent.state
+        );
+    }
+    Ok(())
+}
+
+fn ensure_agent_ready_for_ad_hoc_round(agent: &AgentSummary) -> Result<()> {
+    if agent.current_task_id.is_some() {
+        bail!(
+            "agent {} has an in-flight task and cannot run an ad hoc round",
+            agent.name
+        );
+    }
+    if agent.current_session_id.is_some() {
+        bail!("agent {} already has a live session attached", agent.name);
+    }
+    if agent.state != AgentSessionState::Idle {
+        bail!(
+            "agent {} must be idle before running an ad hoc round, actual {:?}",
+            agent.name,
+            agent.state
+        );
+    }
+    Ok(())
+}
+
+fn ensure_agent_ready_for_task_round(agent: &AgentSummary, task_id: &str) -> Result<()> {
+    if agent.current_task_id.as_deref() != Some(task_id) {
+        bail!(
+            "agent {} is not currently assigned to task {}",
+            agent.name,
+            task_id
+        );
+    }
+    if agent.current_session_id.is_some() {
+        bail!("agent {} already has a live session attached", agent.name);
+    }
+    if agent.state != AgentSessionState::Busy {
+        bail!(
+            "agent {} must be busy before running assigned task {}, actual {:?}",
+            agent.name,
+            task_id,
+            agent.state
+        );
+    }
+    Ok(())
+}
+
 async fn run_task_round(shared: &AppShared, task_id: &str) -> Result<ControlResponse> {
     let task = {
         let state = shared.state.read().await;
@@ -695,6 +757,7 @@ async fn run_task_round(shared: &AppShared, task_id: &str) -> Result<ControlResp
             .cloned()
             .ok_or_else(|| anyhow!("target agent not registered: {}", task.to_agent))?
     };
+    ensure_agent_ready_for_task_round(&agent, &task.task_id)?;
 
     let accepted = transition_task_state(
         shared,
@@ -1435,6 +1498,53 @@ async fn stop_agent_session(shared: &AppShared, agent_name: &str) -> Result<Stri
     Ok(session_id)
 }
 
+async fn recover_agent(shared: &AppShared, agent_name: &str) -> Result<AgentSummary> {
+    let mut updated = {
+        let state = shared.state.read().await;
+        state
+            .agents
+            .get(agent_name)
+            .cloned()
+            .ok_or_else(|| anyhow!("agent not registered: {agent_name}"))?
+    };
+
+    if updated.current_task_id.is_some() {
+        bail!("agent {agent_name} still has an in-flight task and cannot be recovered");
+    }
+    if updated.current_session_id.is_some() {
+        bail!("agent {agent_name} still has a live session and cannot be recovered");
+    }
+    if updated.state != AgentSessionState::Blocked {
+        bail!(
+            "agent {agent_name} must be blocked before recovery, actual {:?}",
+            updated.state
+        );
+    }
+
+    updated.state = AgentSessionState::Idle;
+    updated.last_heartbeat_at = Some(Utc::now());
+
+    {
+        let db = shared.db.lock().expect("db mutex poisoned");
+        db.upsert_agent(&updated)?;
+    }
+
+    {
+        let mut state = shared.state.write().await;
+        state.agents.insert(agent_name.to_string(), updated.clone());
+    }
+
+    shared
+        .events_tx
+        .send(DashboardEvent::AgentStateChanged {
+            agent: updated.clone(),
+        })
+        .ok();
+    record_stream_event(shared, agent_name, "stdout", "[AGENT_RECOVERED]").await?;
+
+    Ok(updated)
+}
+
 fn is_session_stop_error(err: &anyhow::Error) -> bool {
     err.to_string()
         .contains("codex session stop requested for agent")
@@ -1858,4 +1968,62 @@ async fn transition_impl(
         .ok();
 
     Ok(task)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ensure_agent_ready_for_ad_hoc_round, ensure_agent_ready_for_new_task,
+        ensure_agent_ready_for_task_round,
+    };
+    use crate::models::{AgentRole, AgentSessionState, AgentSummary};
+
+    fn sample_agent() -> AgentSummary {
+        AgentSummary {
+            name: "child".to_string(),
+            role: AgentRole::Child,
+            repo_name: Some("repo".to_string()),
+            cwd: ".".to_string(),
+            thread_id: None,
+            current_session_id: None,
+            state: AgentSessionState::Idle,
+            current_task_id: None,
+            last_output_at: None,
+            last_heartbeat_at: None,
+        }
+    }
+
+    #[test]
+    fn idle_agent_is_ready_for_new_task_and_ad_hoc_round() {
+        let agent = sample_agent();
+        assert!(ensure_agent_ready_for_new_task(&agent).is_ok());
+        assert!(ensure_agent_ready_for_ad_hoc_round(&agent).is_ok());
+    }
+
+    #[test]
+    fn blocked_agent_is_rejected_for_new_task() {
+        let mut agent = sample_agent();
+        agent.state = AgentSessionState::Blocked;
+        let err = ensure_agent_ready_for_new_task(&agent).unwrap_err();
+        assert!(err.to_string().contains("must be idle"));
+    }
+
+    #[test]
+    fn ad_hoc_round_rejects_agent_with_live_session() {
+        let mut agent = sample_agent();
+        agent.current_session_id = Some("S-1".to_string());
+        let err = ensure_agent_ready_for_ad_hoc_round(&agent).unwrap_err();
+        assert!(err.to_string().contains("live session"));
+    }
+
+    #[test]
+    fn task_round_requires_matching_busy_assignment() {
+        let mut agent = sample_agent();
+        agent.state = AgentSessionState::Busy;
+        agent.current_task_id = Some("T-1".to_string());
+        assert!(ensure_agent_ready_for_task_round(&agent, "T-1").is_ok());
+
+        let err = ensure_agent_ready_for_task_round(&agent, "T-2").unwrap_err();
+        assert!(err.to_string().contains("not currently assigned"));
+    }
 }

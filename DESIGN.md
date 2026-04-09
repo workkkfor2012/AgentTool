@@ -54,6 +54,8 @@ The next task may be assigned only after the current one is fully `closed`.
 
 This is stricter than `completed`.
 
+Blocked agents are not eligible for new task assignment or ad hoc rounds until they are explicitly recovered.
+
 ## 3. Current architecture
 
 ```mermaid
@@ -248,6 +250,7 @@ Current practical use:
 - No dashboard action buttons yet
 - No richer policy engine beyond per-task auto resolution yet
 - Session stop currently works only for live sessions started by the current `agentd` process, not for recovered historical records
+- Agent recovery is intentionally conservative: it only unlocks a `blocked` agent that has no in-flight task and no live session
 - No stale-record cleanup command yet
 
 ## 12. Next implementation targets
