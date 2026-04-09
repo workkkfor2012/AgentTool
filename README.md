@@ -182,6 +182,7 @@ F:\work\github\AgentTool\target\debug\agentctl.exe close-task --task T-REPLACE-M
 `send-decision --close` now applies the decision, acknowledges it, closes the task, and releases the child agent in one round trip.
 `close-task` now auto-acknowledges the latest pending decision for that task before releasing the child agent.
 `run-task-round` now auto-resolves `report` and `wait_decision` tasks when the task was created with both `--auto-resolve-by` and `--auto-resolve-summary`.
+Each task now keeps the latest child-feedback summary, blocking level, topic, details, and completed round count, so the next child round can be prompted with fresh context instead of only the original task summary.
 Blocked agents are now rejected for new task assignment and ad hoc rounds until they are explicitly recovered.
 `cancel-task` now gives the main agent an explicit abort path for non-live tasks and releases the child agent back to `idle`.
 `retry-task` now reopens `failed` or `cancelled` tasks as `pending` and reassigns them to the original child agent when that agent is idle.
@@ -235,6 +236,7 @@ It renders:
 The initial snapshot now includes `sessions` and `recent_streams`, so the page does not need to wait for new log lines before showing context.
 Agents also expose their `current_session_id`, so the dashboard can show which live session is attached to which agent.
 The dashboard now emphasizes live communication flow for open tasks instead of building a history replay workflow.
+Open-task rows now also surface the latest child-feedback summary and round count.
 
 ## Structured task rounds
 

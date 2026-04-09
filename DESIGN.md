@@ -205,6 +205,7 @@ Supported `status` values:
 - `wait_decision`
 
 In the current workflow, a main-agent decision usually keeps the same task open and sends it back to `pending` for the next child round. Closing the task is explicit and separate.
+The task record also carries the latest child-feedback summary, blocking level, topic, details, and round count so the next round prompt can reuse current context directly.
 
 ## 8. Dashboard event model
 

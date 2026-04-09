@@ -454,6 +454,12 @@ async fn dispatch_control_request(
                 summary,
                 auto_resolve_by,
                 auto_resolve_summary,
+                round_count: 0,
+                latest_child_status: None,
+                latest_child_summary: None,
+                latest_child_blocking: None,
+                latest_child_topic: None,
+                latest_child_details: None,
                 state: TaskState::Pending,
                 created_at: now,
                 updated_at: now,
@@ -544,7 +550,7 @@ async fn dispatch_control_request(
             topic,
             details,
         } => {
-            let task = transition_task_state(
+            let reported_task = transition_task_state(
                 &shared,
                 &task_id,
                 &agent,
@@ -563,7 +569,7 @@ async fn dispatch_control_request(
             {
                 let db = shared.db.lock().expect("db mutex poisoned");
                 db.insert_task_event(
-                    &task.task_id,
+                    &reported_task.task_id,
                     "report_payload",
                     Some(TaskState::Reported),
                     Some(TaskState::Reported),
@@ -571,6 +577,19 @@ async fn dispatch_control_request(
                 )?;
             }
             record_stream_event(&shared, &agent, "stdout", &format!("[REPORT] {payload}")).await?;
+
+            let task = update_task_latest_child_feedback(
+                &shared,
+                &reported_task,
+                "report",
+                Some(topic.clone()),
+                Some(blocking.clone()),
+                Some(topic),
+                Some(details),
+                true,
+                "report_payload",
+            )
+            .await?;
 
             Ok(ControlResponse::Task { task })
         }
@@ -801,6 +820,14 @@ fn is_demo_agent_name(agent_name: &str) -> bool {
     agent_name.starts_with("demo_") || agent_name == "usage_limit_probe"
 }
 
+fn latest_decision_for_task(state: &RuntimeState, task_id: &str) -> Option<DecisionSummary> {
+    state.decisions
+        .values()
+        .filter(|decision| decision.task_id == task_id)
+        .max_by_key(|decision| decision.created_at)
+        .cloned()
+}
+
 async fn broadcast_runtime_snapshot(shared: &AppShared) {
     let snapshot = shared.state.read().await.snapshot();
     shared
@@ -856,7 +883,11 @@ async fn run_task_round(shared: &AppShared, task_id: &str) -> Result<ControlResp
     )
     .await?;
 
-    let prompt = compose_task_prompt(&task);
+    let latest_decision = {
+        let state = shared.state.read().await;
+        latest_decision_for_task(&state, &task.task_id)
+    };
+    let prompt = compose_task_prompt(&task, latest_decision.as_ref());
     let schema_path = shared
         .config
         .root_dir
@@ -988,6 +1019,23 @@ async fn run_task_round(shared: &AppShared, task_id: &str) -> Result<ControlResp
         Some(round.thread_id.clone()),
         next_agent_state,
         round.completed_at,
+    )
+    .await?;
+
+    let final_task = update_task_latest_child_feedback(
+        shared,
+        &final_task,
+        match payload.status {
+            TaskRoundStatus::Result => "result",
+            TaskRoundStatus::Report => "report",
+            TaskRoundStatus::WaitDecision => "wait_decision",
+        },
+        Some(payload.summary.clone()),
+        payload.blocking.clone(),
+        payload.topic.clone(),
+        payload.details.clone(),
+        true,
+        "task_feedback_updated",
     )
     .await?;
 
@@ -1557,7 +1605,82 @@ async fn reopen_task_as_pending(
     Ok(updated)
 }
 
-fn compose_task_prompt(task: &TaskSummary) -> String {
+async fn update_task_latest_child_feedback(
+    shared: &AppShared,
+    task: &TaskSummary,
+    status: &str,
+    summary: Option<String>,
+    blocking: Option<String>,
+    topic: Option<String>,
+    details: Option<String>,
+    increment_round_count: bool,
+    event_type: &str,
+) -> Result<TaskSummary> {
+    let mut updated = task.clone();
+    if increment_round_count {
+        updated.round_count = updated.round_count.saturating_add(1);
+    }
+    updated.latest_child_status = Some(status.to_string());
+    updated.latest_child_summary = summary;
+    updated.latest_child_blocking = blocking;
+    updated.latest_child_topic = topic;
+    updated.latest_child_details = details;
+    updated.updated_at = Utc::now();
+
+    {
+        let db = shared.db.lock().expect("db mutex poisoned");
+        db.update_task(&updated)?;
+    }
+
+    {
+        let mut state = shared.state.write().await;
+        state.tasks.insert(updated.task_id.clone(), updated.clone());
+    }
+
+    shared
+        .events_tx
+        .send(DashboardEvent::TaskEvent {
+            task: updated.clone(),
+            event_type: event_type.to_string(),
+        })
+        .ok();
+
+    Ok(updated)
+}
+
+fn compose_task_prompt(task: &TaskSummary, latest_decision: Option<&DecisionSummary>) -> String {
+    let latest_child_context = if task.round_count == 0 {
+        "- latest_child_round: none\n".to_string()
+    } else {
+        format!(
+            "- latest_child_round: {round_count}\n\
+- latest_child_status: {status}\n\
+- latest_child_summary: {summary}\n\
+- latest_child_blocking: {blocking}\n\
+- latest_child_topic: {topic}\n\
+- latest_child_details: {details}\n",
+            round_count = task.round_count,
+            status = task.latest_child_status.as_deref().unwrap_or("-"),
+            summary = task.latest_child_summary.as_deref().unwrap_or("-"),
+            blocking = task.latest_child_blocking.as_deref().unwrap_or("-"),
+            topic = task.latest_child_topic.as_deref().unwrap_or("-"),
+            details = task.latest_child_details.as_deref().unwrap_or("-"),
+        )
+    };
+
+    let latest_decision_context = if let Some(decision) = latest_decision {
+        format!(
+            "- latest_main_decision_id: {id}\n\
+- latest_main_decision_status: {status}\n\
+- latest_main_decision_summary: {summary}\n",
+            id = decision.decision_id,
+            status = decision.status,
+            summary = decision.summary,
+        )
+    } else {
+        "- latest_main_decision: none\n".to_string()
+    };
+
     format!(
         "You are executing one repository-scoped task. Work only inside the current repository and do not assume cross-repo facts.\n\
 \n\
@@ -1569,18 +1692,27 @@ Task context:\n\
 - to: {to_agent}\n\
 - title: {title}\n\
 - summary: {summary}\n\
+- round_count_completed: {round_count}\n\
+\n\
+Most recent round context:\n\
+{latest_child_context}\
+{latest_decision_context}\
 \n\
 Interpretation rules:\n\
 - Use status=result when you completed the requested work for this round.\n\
 - Use status=report when you have a concrete issue, gap, or uncertainty for the main agent to analyze.\n\
 - Use status=wait_decision when you must stop and wait before continuing.\n\
+- If a latest main decision exists, treat it as the current instruction for this new round.\n\
 - Keep changed_files limited to files you actually changed in this repository.\n\
 - Do not wrap the JSON in markdown fences.\n",
         task_id = task.task_id,
         from_agent = task.from_agent,
         to_agent = task.to_agent,
         title = task.title,
-        summary = task.summary
+        summary = task.summary,
+        round_count = task.round_count,
+        latest_child_context = latest_child_context,
+        latest_decision_context = latest_decision_context,
     )
 }
 
@@ -1613,9 +1745,9 @@ async fn maybe_auto_resolve_task(
     )
     .await?;
 
-    let (decision, closed_task) =
+    let (decision, continued_task) =
         resolve_task_for_main(shared, &task.task_id, &analyzer, &summary).await?;
-    Ok((closed_task, Some(decision)))
+    Ok((continued_task, Some(decision)))
 }
 
 async fn analyze_task_for_main(
@@ -2697,10 +2829,12 @@ async fn transition_impl(
 #[cfg(test)]
 mod tests {
     use super::{
-        desired_agent_state_for_task, ensure_agent_ready_for_ad_hoc_round,
+        compose_task_prompt, desired_agent_state_for_task, ensure_agent_ready_for_ad_hoc_round,
         ensure_agent_ready_for_new_task, ensure_agent_ready_for_task_round,
     };
-    use crate::models::{AgentRole, AgentSessionState, AgentSummary, TaskState, TaskSummary};
+    use crate::models::{
+        AgentRole, AgentSessionState, AgentSummary, DecisionSummary, TaskState, TaskSummary,
+    };
     use chrono::Utc;
 
     fn sample_agent() -> AgentSummary {
@@ -2727,6 +2861,12 @@ mod tests {
             summary: "demo".to_string(),
             auto_resolve_by: None,
             auto_resolve_summary: None,
+            round_count: 0,
+            latest_child_status: None,
+            latest_child_summary: None,
+            latest_child_blocking: None,
+            latest_child_topic: None,
+            latest_child_details: None,
             state,
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -2779,5 +2919,32 @@ mod tests {
             let task = sample_task(task_state);
             assert_eq!(desired_agent_state_for_task(&task), AgentSessionState::Blocked);
         }
+    }
+
+    #[test]
+    fn task_prompt_includes_latest_round_and_decision_context() {
+        let mut task = sample_task(TaskState::Pending);
+        task.round_count = 2;
+        task.latest_child_status = Some("wait_decision".to_string());
+        task.latest_child_summary = Some("Need input".to_string());
+        task.latest_child_blocking = Some("P1".to_string());
+        task.latest_child_topic = Some("schema".to_string());
+        task.latest_child_details = Some("Need the field contract".to_string());
+
+        let decision = DecisionSummary {
+            decision_id: "D-1".to_string(),
+            task_id: task.task_id.clone(),
+            issued_by: "main".to_string(),
+            target_agent: task.to_agent.clone(),
+            summary: "Proceed with the new schema".to_string(),
+            status: "acknowledged".to_string(),
+            created_at: Utc::now(),
+            acknowledged_at: Some(Utc::now()),
+        };
+
+        let prompt = compose_task_prompt(&task, Some(&decision));
+        assert!(prompt.contains("latest_child_round: 2"));
+        assert!(prompt.contains("latest_child_summary: Need input"));
+        assert!(prompt.contains("latest_main_decision_summary: Proceed with the new schema"));
     }
 }

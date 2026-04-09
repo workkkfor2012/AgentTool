@@ -64,6 +64,12 @@ impl Database {
                 summary TEXT NOT NULL,
                 auto_resolve_by TEXT,
                 auto_resolve_summary TEXT,
+                round_count INTEGER NOT NULL DEFAULT 0,
+                latest_child_status TEXT,
+                latest_child_summary TEXT,
+                latest_child_blocking TEXT,
+                latest_child_topic TEXT,
+                latest_child_details TEXT,
                 state TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
@@ -106,6 +112,12 @@ impl Database {
         self.ensure_column("agents", "current_session_id", "TEXT")?;
         self.ensure_column("tasks", "auto_resolve_by", "TEXT")?;
         self.ensure_column("tasks", "auto_resolve_summary", "TEXT")?;
+        self.ensure_column("tasks", "round_count", "INTEGER NOT NULL DEFAULT 0")?;
+        self.ensure_column("tasks", "latest_child_status", "TEXT")?;
+        self.ensure_column("tasks", "latest_child_summary", "TEXT")?;
+        self.ensure_column("tasks", "latest_child_blocking", "TEXT")?;
+        self.ensure_column("tasks", "latest_child_topic", "TEXT")?;
+        self.ensure_column("tasks", "latest_child_details", "TEXT")?;
         self.ensure_column("sessions", "session_mode", "TEXT NOT NULL DEFAULT 'round'")?;
         self.ensure_column("sessions", "thread_id", "TEXT")?;
         Ok(())
@@ -182,8 +194,8 @@ impl Database {
         self.conn.execute(
             r#"
             INSERT INTO tasks (
-                id, from_agent, to_agent, title, summary, auto_resolve_by, auto_resolve_summary, state, created_at, updated_at, closed_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                id, from_agent, to_agent, title, summary, auto_resolve_by, auto_resolve_summary, round_count, latest_child_status, latest_child_summary, latest_child_blocking, latest_child_topic, latest_child_details, state, created_at, updated_at, closed_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
             "#,
             params![
                 task.task_id,
@@ -193,6 +205,12 @@ impl Database {
                 task.summary,
                 task.auto_resolve_by,
                 task.auto_resolve_summary,
+                i64::from(task.round_count),
+                task.latest_child_status,
+                task.latest_child_summary,
+                task.latest_child_blocking,
+                task.latest_child_topic,
+                task.latest_child_details,
                 serialize_task_state(&task.state),
                 task.created_at.to_rfc3339(),
                 task.updated_at.to_rfc3339(),
@@ -206,11 +224,17 @@ impl Database {
         self.conn.execute(
             r#"
             UPDATE tasks
-            SET state = ?2, updated_at = ?3, closed_at = ?4
+            SET round_count = ?2, latest_child_status = ?3, latest_child_summary = ?4, latest_child_blocking = ?5, latest_child_topic = ?6, latest_child_details = ?7, state = ?8, updated_at = ?9, closed_at = ?10
             WHERE id = ?1
             "#,
             params![
                 task.task_id,
+                i64::from(task.round_count),
+                task.latest_child_status,
+                task.latest_child_summary,
+                task.latest_child_blocking,
+                task.latest_child_topic,
+                task.latest_child_details,
                 serialize_task_state(&task.state),
                 task.updated_at.to_rfc3339(),
                 task.closed_at.map(|dt| dt.to_rfc3339()),
@@ -440,7 +464,7 @@ impl Database {
     pub fn load_tasks(&self) -> Result<Vec<TaskSummary>> {
         let mut stmt = self.conn.prepare(
             r#"
-            SELECT id, from_agent, to_agent, title, summary, auto_resolve_by, auto_resolve_summary, state, created_at, updated_at, closed_at
+            SELECT id, from_agent, to_agent, title, summary, auto_resolve_by, auto_resolve_summary, round_count, latest_child_status, latest_child_summary, latest_child_blocking, latest_child_topic, latest_child_details, state, created_at, updated_at, closed_at
             FROM tasks
             ORDER BY created_at ASC
             "#,
@@ -455,10 +479,16 @@ impl Database {
                 summary: row.get(4)?,
                 auto_resolve_by: row.get(5)?,
                 auto_resolve_summary: row.get(6)?,
-                state: parse_task_state(row.get::<_, String>(7)?),
-                created_at: parse_required_datetime(row.get(8)?)?,
-                updated_at: parse_required_datetime(row.get(9)?)?,
-                closed_at: parse_datetime(row.get(10)?),
+                round_count: row.get::<_, i64>(7)?.max(0) as u32,
+                latest_child_status: row.get(8)?,
+                latest_child_summary: row.get(9)?,
+                latest_child_blocking: row.get(10)?,
+                latest_child_topic: row.get(11)?,
+                latest_child_details: row.get(12)?,
+                state: parse_task_state(row.get::<_, String>(13)?),
+                created_at: parse_required_datetime(row.get(14)?)?,
+                updated_at: parse_required_datetime(row.get(15)?)?,
+                closed_at: parse_datetime(row.get(16)?),
             })
         })?;
 

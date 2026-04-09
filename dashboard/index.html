@@ -881,6 +881,10 @@
           item.task.task_id,
           item.task.title,
           item.task.summary,
+          item.task.latest_child_status,
+          item.task.latest_child_summary,
+          item.task.latest_child_topic,
+          item.task.latest_child_details,
           item.task.from_agent,
           item.task.to_agent,
           item.phase,
@@ -1079,6 +1083,12 @@
           { label: "State", value: `<span class="${stateClass(record.state)}">${esc(record.state)}</span>` },
           { label: "Title", value: esc(record.title) },
           { label: "Summary", value: esc(record.summary || "-") },
+          { label: "Round count", value: esc(String(record.round_count ?? 0)) },
+          { label: "Latest child status", value: esc(record.latest_child_status || "-") },
+          { label: "Latest child summary", value: esc(record.latest_child_summary || "-") },
+          { label: "Latest child blocking", value: esc(record.latest_child_blocking || "-") },
+          { label: "Latest child topic", value: esc(record.latest_child_topic || "-") },
+          { label: "Latest child details", value: esc(record.latest_child_details || "-") },
           { label: "From", value: `<span class="mono">${esc(record.from_agent)}</span>`, extraClass: "mono" },
           { label: "To", value: `<span class="mono">${esc(record.to_agent)}</span>`, extraClass: "mono" },
           { label: "Auto resolve by", value: esc(record.auto_resolve_by || "-") },
@@ -1178,10 +1188,12 @@
             <td>
               <div class="mono">${esc(item.task.task_id)}</div>
               <div>${esc(item.task.title)}</div>
+              <div class="meta">round ${esc(String(item.task.round_count ?? 0))}</div>
             </td>
             <td>
               <div class="mono">${esc(item.phase)}</div>
               <div class="meta">${esc(item.note)}</div>
+              <div class="meta">${esc(item.task.latest_child_status ? `${item.task.latest_child_status}: ${item.task.latest_child_summary || "-"}` : "No child feedback yet")}</div>
             </td>
             <td class="mono">${esc(item.waitingOn)}</td>
             <td>
@@ -1195,6 +1207,7 @@
             <td>
               <div class="mono">${esc(item.decision?.decision_id || "-")}</div>
               <div class="${stateClass(item.decision?.status)}">${esc(item.decision?.status || "-")}</div>
+              <div class="meta">${esc(item.decision?.summary || "-")}</div>
             </td>
             <td>${fmtTime(item.task.updated_at)}</td>
           </tr>
