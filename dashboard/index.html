@@ -790,9 +790,11 @@
       switch (task.state) {
         case "pending":
           return {
-            phase: "queued",
+            phase: decision ? "awaiting_child_followup" : "queued",
             waitingOn: "child",
-            note: "Task is queued for the child agent to start.",
+            note: decision
+              ? "Main decision was applied. The same task is ready for the child agent's next round."
+              : "Task is queued for the child agent to start.",
           };
         case "accepted":
           return {

@@ -171,6 +171,7 @@ Supported task states:
 The critical rule is:
 
 - a child agent is not available for another task until the current task reaches `closed`
+- the same task may move from `reported` or `blocked_waiting_decision` back to `pending` after a main-agent decision, enabling repeated rounds on one long-lived work item
 
 Operational recovery rule:
 
@@ -202,6 +203,8 @@ Supported `status` values:
 - `result`
 - `report`
 - `wait_decision`
+
+In the current workflow, a main-agent decision usually keeps the same task open and sends it back to `pending` for the next child round. Closing the task is explicit and separate.
 
 ## 8. Dashboard event model
 

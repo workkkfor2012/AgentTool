@@ -607,7 +607,12 @@ async fn dispatch_control_request(
                 });
             }
 
-            Ok(ControlResponse::Decision { decision })
+            let continued_task =
+                reopen_task_for_next_round(&shared, &task_id, &target_agent).await?;
+            Ok(ControlResponse::DecisionTask {
+                decision,
+                task: continued_task,
+            })
         }
         ControlRequest::AcknowledgeDecision { task_id, agent } => {
             let decision = acknowledge_latest_decision_for_task(&shared, &task_id, &agent).await?;
@@ -1755,7 +1760,7 @@ async fn resolve_task_for_main(
     }
 
     let decision = send_decision_to_task(shared, task_id, analyzer, &target_agent, summary).await?;
-    let task = close_task_after_decision(shared, task_id, &target_agent).await?;
+    let task = reopen_task_for_next_round(shared, task_id, &target_agent).await?;
 
     Ok((decision, task))
 }
@@ -1764,6 +1769,15 @@ async fn acknowledge_latest_decision_for_task(
     shared: &AppShared,
     task_id: &str,
     agent_name: &str,
+) -> Result<DecisionSummary> {
+    acknowledge_latest_decision_for_task_with_stream(shared, task_id, agent_name, true).await
+}
+
+async fn acknowledge_latest_decision_for_task_with_stream(
+    shared: &AppShared,
+    task_id: &str,
+    agent_name: &str,
+    emit_stream_event: bool,
 ) -> Result<DecisionSummary> {
     let (task, candidate) = {
         let state = shared.state.read().await;
@@ -1839,18 +1853,63 @@ async fn acknowledge_latest_decision_for_task(
         })
         .ok();
 
-    record_stream_event(
+    if emit_stream_event {
+        record_stream_event(
+            shared,
+            agent_name,
+            "stdout",
+            &format!(
+                "[DECISION_ACK] task={} decision={}",
+                task.task_id, updated.decision_id
+            ),
+        )
+        .await?;
+    }
+
+    Ok(updated)
+}
+
+async fn reopen_task_for_next_round(
+    shared: &AppShared,
+    task_id: &str,
+    agent_name: &str,
+) -> Result<TaskSummary> {
+    acknowledge_latest_decision_for_task_with_stream(shared, task_id, agent_name, false).await?;
+
+    let task = transition_task_state(
         shared,
+        task_id,
         agent_name,
-        "stdout",
-        &format!(
-            "[DECISION_ACK] task={} decision={}",
-            task.task_id, updated.decision_id
-        ),
+        TaskState::DecisionSent,
+        TaskState::Pending,
+        "task_reopened",
     )
     .await?;
 
-    Ok(updated)
+    let mut changed_agent = None;
+    {
+        let mut state = shared.state.write().await;
+        if let Some(agent_summary) = state.agents.get_mut(agent_name) {
+            agent_summary.current_task_id = Some(task.task_id.clone());
+            agent_summary.state = AgentSessionState::Busy;
+            agent_summary.last_output_at = Some(Utc::now());
+            agent_summary.last_heartbeat_at = Some(Utc::now());
+            changed_agent = Some(agent_summary.clone());
+        }
+    }
+
+    if let Some(agent_summary) = changed_agent {
+        let db = shared.db.lock().expect("db mutex poisoned");
+        db.upsert_agent(&agent_summary)?;
+        shared
+            .events_tx
+            .send(DashboardEvent::AgentStateChanged {
+                agent: agent_summary,
+            })
+            .ok();
+    }
+
+    Ok(task)
 }
 
 async fn close_task_after_decision(

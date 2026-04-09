@@ -159,6 +159,12 @@ Resolve a reported task in one step:
 F:\work\github\AgentTool\target\debug\agentctl.exe resolve-task --task T-REPLACE-ME --analyzer main --summary "approved"
 ```
 
+Send a decision and keep the same task open for the next child round:
+
+```powershell
+F:\work\github\AgentTool\target\debug\agentctl.exe send-decision --task T-REPLACE-ME --issued-by main --target-agent guardpro_factory --summary "continue with the next change"
+```
+
 Send a decision and close the task in one step:
 
 ```powershell
@@ -171,7 +177,8 @@ Close a task after the decision is handled:
 F:\work\github\AgentTool\target\debug\agentctl.exe close-task --task T-REPLACE-ME --agent guardpro_factory
 ```
 
-`resolve-task` now analyzes the task, sends the decision, acknowledges it, closes the task, and releases the child agent in one daemon round trip.
+`resolve-task` now analyzes the task, sends the decision, and reopens the same task as `pending` for the next child round in one daemon round trip.
+`send-decision` now keeps the same task open and returns it to `pending` for the next child round by default.
 `send-decision --close` now applies the decision, acknowledges it, closes the task, and releases the child agent in one round trip.
 `close-task` now auto-acknowledges the latest pending decision for that task before releasing the child agent.
 `run-task-round` now auto-resolves `report` and `wait_decision` tasks when the task was created with both `--auto-resolve-by` and `--auto-resolve-summary`.
@@ -202,6 +209,7 @@ Operational rule:
 
 - `completed` does not unlock the next task.
 - only `closed` unlocks the next task for that child agent.
+- a decision can reopen the same task back to `pending`, so one task can span many main/child rounds before it is eventually closed.
 
 ## Dashboard
 
