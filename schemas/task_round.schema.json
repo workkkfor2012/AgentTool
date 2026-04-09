@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AgentToolTaskRound",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["result", "report", "wait_decision"]
+    },
+    "summary": {
+      "type": "string"
+    },
+    "blocking": {
+      "type": ["string", "null"]
+    },
+    "topic": {
+      "type": ["string", "null"]
+    },
+    "details": {
+      "type": ["string", "null"]
+    },
+    "reason": {
+      "type": ["string", "null"]
+    },
+    "next_suggestion": {
+      "type": ["string", "null"]
+    },
+    "changed_files": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "status",
+    "summary",
+    "blocking",
+    "topic",
+    "details",
+    "reason",
+    "next_suggestion",
+    "changed_files"
+  ]
+}

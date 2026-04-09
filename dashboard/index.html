@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AgentTool Dashboard</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b1020;
+      --panel: #121a31;
+      --panel-2: #18223f;
+      --text: #eef3ff;
+      --muted: #9fb0d2;
+      --line: #2b3a63;
+      --accent: #4cc9f0;
+      --good: #57cc99;
+      --warn: #ffd166;
+      --bad: #ef476f;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      background:
+        radial-gradient(circle at top right, rgba(76, 201, 240, 0.18), transparent 26%),
+        radial-gradient(circle at left bottom, rgba(87, 204, 153, 0.14), transparent 30%),
+        var(--bg);
+      color: var(--text);
+    }
+
+    .shell {
+      max-width: 1600px;
+      margin: 0 auto;
+      padding: 24px;
+    }
+
+    .topbar {
+      display: grid;
+      grid-template-columns: 1.8fr auto auto;
+      gap: 12px;
+      align-items: center;
+      margin-bottom: 18px;
+    }
+
+    .title {
+      background: linear-gradient(135deg, rgba(18, 26, 49, 0.94), rgba(24, 34, 63, 0.94));
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 18px 20px;
+    }
+
+    .title h1 {
+      margin: 0 0 6px;
+      font-size: 24px;
+      font-weight: 700;
+    }
+
+    .title p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .panel {
+      background: rgba(18, 26, 49, 0.92);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 16px;
+      backdrop-filter: blur(10px);
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.28);
+    }
+
+    .status-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.03);
+      font-size: 13px;
+      color: var(--muted);
+    }
+
+    .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      background: var(--warn);
+      box-shadow: 0 0 14px currentColor;
+    }
+
+    .dot.online { color: var(--good); background: var(--good); }
+    .dot.offline { color: var(--bad); background: var(--bad); }
+
+    button, input {
+      border-radius: 12px;
+      border: 1px solid var(--line);
+      background: var(--panel-2);
+      color: var(--text);
+      padding: 10px 12px;
+      font: inherit;
+    }
+
+    button {
+      cursor: pointer;
+      transition: transform 120ms ease, border-color 120ms ease;
+    }
+
+    button:hover {
+      transform: translateY(-1px);
+      border-color: var(--accent);
+    }
+
+    input {
+      width: 360px;
+      max-width: 100%;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 1.1fr 1.4fr;
+      gap: 18px;
+    }
+
+    .stack {
+      display: grid;
+      gap: 18px;
+    }
+
+    h2 {
+      margin: 0 0 12px;
+      font-size: 16px;
+      letter-spacing: 0.02em;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+
+    th, td {
+      padding: 10px 8px;
+      border-bottom: 1px solid rgba(43, 58, 99, 0.75);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      color: var(--muted);
+      font-weight: 600;
+    }
+
+    .mono {
+      font-family: Consolas, "Cascadia Code", monospace;
+      word-break: break-word;
+    }
+
+    .streams {
+      height: 480px;
+      overflow: auto;
+      display: grid;
+      gap: 8px;
+    }
+
+    .stream-line {
+      padding: 10px 12px;
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(43, 58, 99, 0.6);
+    }
+
+    .stream-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 6px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .stream-body {
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: Consolas, "Cascadia Code", monospace;
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .state-idle { color: var(--good); }
+    .state-busy, .state-running, .state-accepted, .state-pending { color: var(--accent); }
+    .state-reported, .state-analyzed, .state-decision_sent, .state-blocked_waiting_decision { color: var(--warn); }
+    .state-blocked, .state-failed, .state-cancelled, .state-offline { color: var(--bad); }
+    .state-closed, .state-completed, .state-succeeded { color: var(--good); }
+
+    @media (max-width: 1100px) {
+      .topbar, .grid { grid-template-columns: 1fr; }
+      input { width: 100%; }
+      .streams { height: 360px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="topbar">
+      <div class="title">
+        <h1>AgentTool Dashboard</h1>
+        <p>本地 Codex 主从编排面板。运行时数据只来自 WebSocket，不走 HTTP 快照接口。</p>
+      </div>
+      <div class="panel">
+        <div class="status-row">
+          <span class="pill"><span id="conn-dot" class="dot offline"></span><span id="conn-text">未连接</span></span>
+          <span class="pill">最近快照: <span id="snapshot-time">-</span></span>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="status-row">
+          <input id="ws-url" value="ws://127.0.0.1:7080/ws" aria-label="WebSocket URL">
+          <button id="reconnect-btn" type="button">重连</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="stack">
+        <section class="panel">
+          <h2>Agents</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Role</th>
+                <th>State</th>
+                <th>Task</th>
+                <th>Session</th>
+                <th>Thread</th>
+              </tr>
+            </thead>
+            <tbody id="agents-body"></tbody>
+          </table>
+        </section>
+
+        <section class="panel">
+          <h2>Decisions</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Task</th>
+                <th>Target</th>
+                <th>Status</th>
+                <th>Summary</th>
+              </tr>
+            </thead>
+            <tbody id="decisions-body"></tbody>
+          </table>
+        </section>
+
+        <section class="panel">
+          <h2>Sessions</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Agent</th>
+                <th>Mode</th>
+                <th>Status</th>
+                <th>PID</th>
+                <th>Thread</th>
+                <th>Started</th>
+                <th>Ended</th>
+              </tr>
+            </thead>
+            <tbody id="sessions-body"></tbody>
+          </table>
+        </section>
+      </div>
+
+      <div class="stack">
+        <section class="panel">
+          <h2>Tasks</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Target</th>
+                <th>State</th>
+                <th>Title</th>
+                <th>Updated</th>
+              </tr>
+            </thead>
+            <tbody id="tasks-body"></tbody>
+          </table>
+        </section>
+
+        <section class="panel">
+          <h2>Streams</h2>
+          <div id="streams" class="streams"></div>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const state = {
+      agents: new Map(),
+      tasks: new Map(),
+      decisions: new Map(),
+      sessions: new Map(),
+      streams: [],
+      ws: null,
+      reconnectTimer: null,
+    };
+
+    const STREAM_LIMIT = 240;
+
+    const agentsBody = document.getElementById("agents-body");
+    const tasksBody = document.getElementById("tasks-body");
+    const decisionsBody = document.getElementById("decisions-body");
+    const sessionsBody = document.getElementById("sessions-body");
+    const streamsBox = document.getElementById("streams");
+    const connDot = document.getElementById("conn-dot");
+    const connText = document.getElementById("conn-text");
+    const snapshotTime = document.getElementById("snapshot-time");
+    const wsUrlInput = document.getElementById("ws-url");
+    const reconnectBtn = document.getElementById("reconnect-btn");
+
+    function fmtTime(value) {
+      if (!value) return "-";
+      return new Date(value).toLocaleString("zh-CN", { hour12: false });
+    }
+
+    function esc(value) {
+      return String(value ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;");
+    }
+
+    function stateClass(value) {
+      return `state-${String(value || "").replaceAll("_", "_")}`;
+    }
+
+    function renderAgents() {
+      const rows = [...state.agents.values()]
+        .sort((a, b) => a.name.localeCompare(b.name))
+        .map((agent) => `
+          <tr>
+            <td class="mono">${esc(agent.name)}</td>
+            <td>${esc(agent.role)}</td>
+            <td class="${stateClass(agent.state)}">${esc(agent.state)}</td>
+            <td class="mono">${esc(agent.current_task_id || "-")}</td>
+            <td class="mono">${esc(agent.current_session_id || "-")}</td>
+            <td class="mono">${esc(agent.thread_id || "-")}</td>
+          </tr>
+        `)
+        .join("");
+      agentsBody.innerHTML = rows || `<tr><td colspan="6">暂无数据</td></tr>`;
+    }
+
+    function renderTasks() {
+      const rows = [...state.tasks.values()]
+        .sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)))
+        .map((task) => `
+          <tr>
+            <td class="mono">${esc(task.task_id)}</td>
+            <td class="mono">${esc(task.to_agent)}</td>
+            <td class="${stateClass(task.state)}">${esc(task.state)}</td>
+            <td>${esc(task.title)}</td>
+            <td>${fmtTime(task.updated_at)}</td>
+          </tr>
+        `)
+        .join("");
+      tasksBody.innerHTML = rows || `<tr><td colspan="5">暂无数据</td></tr>`;
+    }
+
+    function renderDecisions() {
+      const rows = [...state.decisions.values()]
+        .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))
+        .map((decision) => `
+          <tr>
+            <td class="mono">${esc(decision.decision_id)}</td>
+            <td class="mono">${esc(decision.task_id)}</td>
+            <td class="mono">${esc(decision.target_agent)}</td>
+            <td class="${stateClass(decision.status)}">${esc(decision.status)}</td>
+            <td>${esc(decision.summary)}</td>
+          </tr>
+        `)
+        .join("");
+      decisionsBody.innerHTML = rows || `<tr><td colspan="5">暂无数据</td></tr>`;
+    }
+
+    function renderSessions() {
+      const rows = [...state.sessions.values()]
+        .sort((a, b) => String(b.started_at).localeCompare(String(a.started_at)))
+        .map((session) => `
+          <tr>
+            <td class="mono">${esc(session.session_id)}</td>
+            <td class="mono">${esc(session.agent_name)}</td>
+            <td class="mono">${esc(session.session_mode)}</td>
+            <td class="${stateClass(session.status)}">${esc(session.status)}</td>
+            <td class="mono">${esc(session.pid ?? "-")}</td>
+            <td class="mono">${esc(session.thread_id ?? "-")}</td>
+            <td>${fmtTime(session.started_at)}</td>
+            <td>${fmtTime(session.ended_at)}</td>
+          </tr>
+        `)
+        .join("");
+      sessionsBody.innerHTML = rows || `<tr><td colspan="8">暂无数据</td></tr>`;
+    }
+
+    function renderStreams() {
+      const html = state.streams
+        .slice()
+        .reverse()
+        .map((entry) => `
+          <div class="stream-line">
+            <div class="stream-head">
+              <span class="mono">${esc(entry.agent)} · ${esc(entry.stream)}</span>
+              <span>${fmtTime(entry.at)}</span>
+            </div>
+            <div class="stream-body">${esc(entry.content)}</div>
+          </div>
+        `)
+        .join("");
+      streamsBox.innerHTML = html || `<div class="stream-line">暂无流事件</div>`;
+    }
+
+    function renderAll() {
+      renderAgents();
+      renderTasks();
+      renderDecisions();
+      renderSessions();
+      renderStreams();
+    }
+
+    function setConnection(online, text) {
+      connDot.className = `dot ${online ? "online" : "offline"}`;
+      connText.textContent = text;
+    }
+
+    function applySnapshot(snapshot) {
+      state.agents = new Map((snapshot.agents || []).map((item) => [item.name, item]));
+      state.tasks = new Map((snapshot.tasks || []).map((item) => [item.task_id, item]));
+      state.decisions = new Map((snapshot.decisions || []).map((item) => [item.decision_id, item]));
+      state.sessions = new Map((snapshot.sessions || []).map((item) => [item.session_id, item]));
+      state.streams = (snapshot.recent_streams || []).slice(-STREAM_LIMIT);
+      snapshotTime.textContent = fmtTime(snapshot.generated_at);
+      renderAll();
+    }
+
+    function pushStream(event) {
+      state.streams.push(event);
+      if (state.streams.length > STREAM_LIMIT) {
+        state.streams.splice(0, state.streams.length - STREAM_LIMIT);
+      }
+    }
+
+    function handleEvent(message) {
+      switch (message.type) {
+        case "snapshot":
+          applySnapshot(message.snapshot);
+          break;
+        case "agent_state_changed":
+          state.agents.set(message.agent.name, message.agent);
+          renderAgents();
+          break;
+        case "task_event":
+          state.tasks.set(message.task.task_id, message.task);
+          renderTasks();
+          break;
+        case "decision_event":
+          state.decisions.set(message.decision.decision_id, message.decision);
+          renderDecisions();
+          break;
+        case "session_event":
+          state.sessions.set(message.session.session_id, message.session);
+          renderSessions();
+          break;
+        case "stream_chunk":
+          pushStream(message.event);
+          renderStreams();
+          break;
+        case "pong":
+          break;
+        default:
+          console.debug("unknown event", message);
+      }
+    }
+
+    function connect() {
+      if (state.ws) {
+        state.ws.close();
+      }
+
+      const url = wsUrlInput.value.trim();
+      setConnection(false, "连接中...");
+
+      try {
+        state.ws = new WebSocket(url);
+      } catch (error) {
+        setConnection(false, `连接失败: ${error.message}`);
+        scheduleReconnect();
+        return;
+      }
+
+      state.ws.addEventListener("open", () => {
+        setConnection(true, "已连接");
+        state.ws.send(JSON.stringify({ type: "request_snapshot" }));
+      });
+
+      state.ws.addEventListener("message", (event) => {
+        try {
+          handleEvent(JSON.parse(event.data));
+        } catch (error) {
+          console.error("invalid ws payload", error, event.data);
+        }
+      });
+
+      state.ws.addEventListener("close", () => {
+        setConnection(false, "连接断开");
+        scheduleReconnect();
+      });
+
+      state.ws.addEventListener("error", () => {
+        setConnection(false, "连接错误");
+      });
+    }
+
+    function scheduleReconnect() {
+      clearTimeout(state.reconnectTimer);
+      state.reconnectTimer = setTimeout(connect, 2000);
+    }
+
+    reconnectBtn.addEventListener("click", () => {
+      clearTimeout(state.reconnectTimer);
+      connect();
+    });
+
+    connect();
+  </script>
+</body>
+</html>

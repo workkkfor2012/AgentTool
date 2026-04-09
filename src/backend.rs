@@ -1,0 +1,360 @@
+use std::process::ExitStatus;
+
+use anyhow::{Context, Result, bail};
+use chrono::{DateTime, Utc};
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::Command;
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+
+use crate::models::{AgentRoundResult, AgentSummary, SessionMode};
+
+pub struct BackendStartRequest {
+    pub agent: AgentSummary,
+    pub prompt: String,
+    pub output_schema: Option<String>,
+    pub session_mode: SessionMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendStream {
+    Stdout,
+    Stderr,
+}
+
+pub enum BackendEvent {
+    Line { stream: BackendStream, line: String },
+    ThreadStarted { thread_id: String },
+}
+
+pub struct BackendHandle {
+    pub session_mode: SessionMode,
+    pub pid: Option<u32>,
+    pub events: mpsc::Receiver<BackendEvent>,
+    pub completion: JoinHandle<Result<BackendFinished>>,
+}
+
+pub struct BackendFinished {
+    pub parsed: ParsedCodexRound,
+    pub stderr_lines: Vec<String>,
+    pub status: ExitStatus,
+}
+
+pub struct ParsedCodexRound {
+    pub thread_id: Option<String>,
+    pub final_message: Option<String>,
+    pub error_message: Option<String>,
+}
+
+impl ParsedCodexRound {
+    pub fn new(existing_thread_id: Option<String>) -> Self {
+        Self {
+            thread_id: existing_thread_id,
+            final_message: None,
+            error_message: None,
+        }
+    }
+
+    pub fn ingest_stdout_line(&mut self, line: &str) -> Option<String> {
+        let value = match serde_json::from_str::<serde_json::Value>(line) {
+            Ok(value) => value,
+            Err(_) => return None,
+        };
+
+        let kind = match value.get("type").and_then(|kind| kind.as_str()) {
+            Some(kind) => kind,
+            None => return None,
+        };
+
+        match kind {
+            "thread.started" => {
+                if let Some(thread_id) = value.get("thread_id").and_then(|v| v.as_str()) {
+                    let thread_id = thread_id.to_string();
+                    self.thread_id = Some(thread_id.clone());
+                    return Some(thread_id);
+                }
+            }
+            "error" | "turn.failed" => {
+                if let Some(message) = extract_error_message(&value) {
+                    self.error_message = Some(message);
+                }
+            }
+            "item.completed" => {
+                if let Some(text) = value.get("item").and_then(extract_item_text) {
+                    self.final_message = Some(text.to_string());
+                }
+            }
+            _ => {}
+        }
+
+        None
+    }
+
+    pub fn into_round_result(
+        self,
+        agent_name: &str,
+        completed_at: DateTime<Utc>,
+    ) -> Result<AgentRoundResult> {
+        Ok(AgentRoundResult {
+            agent: agent_name.to_string(),
+            thread_id: self
+                .thread_id
+                .ok_or_else(|| anyhow::anyhow!("missing thread_id from codex output"))?,
+            final_message: self.final_message.unwrap_or_default(),
+            completed_at,
+        })
+    }
+}
+
+pub fn start_backend(request: BackendStartRequest) -> Result<BackendHandle> {
+    match request.session_mode {
+        SessionMode::Round => start_round_backend(request),
+        SessionMode::Pty => bail!("pty backend not implemented yet"),
+    }
+}
+
+fn start_round_backend(request: BackendStartRequest) -> Result<BackendHandle> {
+    let mut command = build_codex_round_command(
+        &request.agent,
+        &request.prompt,
+        request.output_schema.as_deref(),
+    );
+
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("failed to spawn codex for agent {}", request.agent.name))?;
+    let pid = child.id();
+
+    let stdout = child.stdout.take().ok_or_else(|| {
+        anyhow::anyhow!("failed to capture stdout for agent {}", request.agent.name)
+    })?;
+    let stderr = child.stderr.take().ok_or_else(|| {
+        anyhow::anyhow!("failed to capture stderr for agent {}", request.agent.name)
+    })?;
+
+    let (tx, rx) = mpsc::channel(256);
+    let existing_thread_id = request.agent.thread_id.clone();
+
+    let completion = tokio::spawn(async move {
+        let stdout_tx = tx.clone();
+        let stderr_tx = tx.clone();
+
+        let stdout_task =
+            tokio::spawn(
+                async move { parse_codex_stdout(stdout, stdout_tx, existing_thread_id).await },
+            );
+        let stderr_task = tokio::spawn(async move { stream_stderr(stderr, stderr_tx).await });
+
+        drop(tx);
+
+        let status = child.wait().await?;
+        let parsed = stdout_task.await.context("stdout task join failed")??;
+        let stderr_lines = stderr_task.await.context("stderr task join failed")??;
+
+        Ok(BackendFinished {
+            parsed,
+            stderr_lines,
+            status,
+        })
+    });
+
+    Ok(BackendHandle {
+        session_mode: SessionMode::Round,
+        pid,
+        events: rx,
+        completion,
+    })
+}
+
+pub fn build_codex_round_command(
+    agent: &AgentSummary,
+    prompt: &str,
+    output_schema: Option<&str>,
+) -> Command {
+    let mut command = Command::new("codex");
+    if let Some(thread_id) = &agent.thread_id {
+        command.args([
+            "exec",
+            "resume",
+            "--json",
+            "--skip-git-repo-check",
+            thread_id,
+            prompt,
+        ]);
+    } else {
+        command.args([
+            "exec",
+            "--json",
+            "--skip-git-repo-check",
+            "--cd",
+            &agent.cwd,
+            prompt,
+        ]);
+    }
+
+    if let Some(schema_path) = output_schema {
+        command.args(["--output-schema", schema_path]);
+    }
+
+    command.stdout(std::process::Stdio::piped());
+    command.stderr(std::process::Stdio::piped());
+    command
+}
+
+async fn parse_codex_stdout(
+    stdout: tokio::process::ChildStdout,
+    tx: mpsc::Sender<BackendEvent>,
+    existing_thread_id: Option<String>,
+) -> Result<ParsedCodexRound> {
+    let mut reader = BufReader::new(stdout).lines();
+    let mut parsed = ParsedCodexRound::new(existing_thread_id);
+
+    while let Some(line) = reader.next_line().await? {
+        tx.send(BackendEvent::Line {
+            stream: BackendStream::Stdout,
+            line: line.clone(),
+        })
+        .await
+        .ok();
+
+        if let Some(thread_id) = parsed.ingest_stdout_line(&line) {
+            tx.send(BackendEvent::ThreadStarted { thread_id })
+                .await
+                .ok();
+        }
+    }
+
+    Ok(parsed)
+}
+
+async fn stream_stderr(
+    stderr: tokio::process::ChildStderr,
+    tx: mpsc::Sender<BackendEvent>,
+) -> Result<Vec<String>> {
+    let mut reader = BufReader::new(stderr).lines();
+    let mut lines = Vec::new();
+    while let Some(line) = reader.next_line().await? {
+        tx.send(BackendEvent::Line {
+            stream: BackendStream::Stderr,
+            line: line.clone(),
+        })
+        .await
+        .ok();
+        lines.push(line);
+    }
+    Ok(lines)
+}
+
+fn extract_error_message(value: &serde_json::Value) -> Option<String> {
+    value
+        .get("message")
+        .and_then(|message| message.as_str())
+        .map(ToString::to_string)
+        .or_else(|| {
+            value
+                .get("error")
+                .and_then(|error| error.get("message"))
+                .and_then(|message| message.as_str())
+                .map(ToString::to_string)
+        })
+        .or_else(|| {
+            value
+                .get("details")
+                .and_then(|details| details.get("message"))
+                .and_then(|message| message.as_str())
+                .map(ToString::to_string)
+        })
+}
+
+fn extract_item_text<'a>(item: &'a serde_json::Value) -> Option<&'a str> {
+    item.get("text")
+        .and_then(|text| text.as_str())
+        .or_else(|| {
+            item.get("content").and_then(|content| {
+                content.as_array().and_then(|parts| {
+                    parts.iter().find_map(|part| {
+                        part.get("text")
+                            .and_then(|text| text.as_str())
+                            .or_else(|| part.get("content").and_then(|text| text.as_str()))
+                    })
+                })
+            })
+        })
+        .or_else(|| item.get("output_text").and_then(|text| text.as_str()))
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::models::{AgentRole, AgentSessionState, AgentSummary, SessionMode};
+
+    use super::{BackendStartRequest, BackendStream, ParsedCodexRound, start_backend};
+
+    #[test]
+    fn ingests_thread_started_and_completed_item() {
+        let mut parsed = ParsedCodexRound::new(None);
+
+        let thread =
+            parsed.ingest_stdout_line(r#"{"type":"thread.started","thread_id":"thr_123"}"#);
+        assert_eq!(thread.as_deref(), Some("thr_123"));
+
+        parsed.ingest_stdout_line(
+            r#"{"type":"item.completed","item":{"content":[{"text":"final output"}]}}"#,
+        );
+
+        assert_eq!(parsed.thread_id.as_deref(), Some("thr_123"));
+        assert_eq!(parsed.final_message.as_deref(), Some("final output"));
+    }
+
+    #[test]
+    fn ingests_error_message_from_nested_payload() {
+        let mut parsed = ParsedCodexRound::new(Some("thr_old".to_string()));
+
+        parsed.ingest_stdout_line(
+            r#"{"type":"turn.failed","error":{"message":"upstream usage limit"}}"#,
+        );
+
+        assert_eq!(parsed.thread_id.as_deref(), Some("thr_old"));
+        assert_eq!(
+            parsed.error_message.as_deref(),
+            Some("upstream usage limit")
+        );
+    }
+
+    #[test]
+    fn backend_stream_variants_are_stable() {
+        assert!(matches!(BackendStream::Stdout, BackendStream::Stdout));
+        assert!(matches!(BackendStream::Stderr, BackendStream::Stderr));
+    }
+
+    #[test]
+    fn pty_backend_dispatch_is_explicitly_unavailable() {
+        let agent = AgentSummary {
+            name: "child".to_string(),
+            role: AgentRole::Child,
+            repo_name: Some("repo".to_string()),
+            cwd: ".".to_string(),
+            thread_id: None,
+            current_session_id: None,
+            state: AgentSessionState::Idle,
+            current_task_id: None,
+            last_output_at: None,
+            last_heartbeat_at: None,
+        };
+
+        let result = start_backend(BackendStartRequest {
+            agent,
+            prompt: "noop".to_string(),
+            output_schema: None,
+            session_mode: SessionMode::Pty,
+        });
+
+        assert!(result.is_err());
+        assert!(
+            result
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("pty backend not implemented yet")
+        );
+    }
+}
