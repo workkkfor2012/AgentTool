@@ -39,6 +39,10 @@ enum Command {
         #[arg(long)]
         task: String,
     },
+    StopAgentSession {
+        #[arg(long)]
+        agent: String,
+    },
     CreateTask {
         #[arg(long)]
         from: String,
@@ -144,6 +148,7 @@ async fn main() -> Result<()> {
         },
         Command::RunAgentRound { agent, prompt } => ControlRequest::RunAgentRound { agent, prompt },
         Command::RunTaskRound { task } => ControlRequest::RunTaskRound { task_id: task },
+        Command::StopAgentSession { agent } => ControlRequest::StopAgentSession { agent },
         Command::CreateTask {
             from,
             to,

@@ -4,7 +4,7 @@ use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::models::{AgentRoundResult, AgentSummary, SessionMode};
@@ -30,14 +30,33 @@ pub enum BackendEvent {
 pub struct BackendHandle {
     pub session_mode: SessionMode,
     pub pid: Option<u32>,
+    pub stop: BackendStopSignal,
     pub events: mpsc::Receiver<BackendEvent>,
     pub completion: JoinHandle<Result<BackendFinished>>,
+}
+
+pub struct BackendStopSignal {
+    stop_tx: Option<oneshot::Sender<()>>,
+}
+
+impl BackendStopSignal {
+    pub fn stop(mut self) -> Result<()> {
+        let stop_tx = self
+            .stop_tx
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("backend stop signal already consumed"))?;
+        stop_tx
+            .send(())
+            .map_err(|_| anyhow::anyhow!("backend already finished before stop request"))?;
+        Ok(())
+    }
 }
 
 pub struct BackendFinished {
     pub parsed: ParsedCodexRound,
     pub stderr_lines: Vec<String>,
     pub status: ExitStatus,
+    pub stopped: bool,
 }
 
 pub struct ParsedCodexRound {
@@ -133,6 +152,7 @@ fn start_round_backend(request: BackendStartRequest) -> Result<BackendHandle> {
     })?;
 
     let (tx, rx) = mpsc::channel(256);
+    let (stop_tx, mut stop_rx) = oneshot::channel();
     let existing_thread_id = request.agent.thread_id.clone();
 
     let completion = tokio::spawn(async move {
@@ -147,7 +167,14 @@ fn start_round_backend(request: BackendStartRequest) -> Result<BackendHandle> {
 
         drop(tx);
 
-        let status = child.wait().await?;
+        let (status, stopped) = tokio::select! {
+            status = child.wait() => (status?, false),
+            _ = &mut stop_rx => {
+                let _ = child.kill().await;
+                let status = child.wait().await?;
+                (status, true)
+            }
+        };
         let parsed = stdout_task.await.context("stdout task join failed")??;
         let stderr_lines = stderr_task.await.context("stderr task join failed")??;
 
@@ -155,12 +182,16 @@ fn start_round_backend(request: BackendStartRequest) -> Result<BackendHandle> {
             parsed,
             stderr_lines,
             status,
+            stopped,
         })
     });
 
     Ok(BackendHandle {
         session_mode: SessionMode::Round,
         pid,
+        stop: BackendStopSignal {
+            stop_tx: Some(stop_tx),
+        },
         events: rx,
         completion,
     })

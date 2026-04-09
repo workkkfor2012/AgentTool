@@ -14,7 +14,9 @@ use tokio::sync::{RwLock, broadcast};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-use crate::backend::{BackendEvent, BackendStartRequest, BackendStream, start_backend};
+use crate::backend::{
+    BackendEvent, BackendStartRequest, BackendStopSignal, BackendStream, start_backend,
+};
 use crate::config::AppConfig;
 use crate::control::{ControlRequest, ControlResponse};
 use crate::db::Database;
@@ -30,6 +32,7 @@ pub struct AppShared {
     state: Arc<RwLock<RuntimeState>>,
     db: Arc<Mutex<Database>>,
     events_tx: broadcast::Sender<DashboardEvent>,
+    active_sessions: Arc<Mutex<HashMap<String, ActiveSessionControl>>>,
 }
 
 pub struct RuntimeState {
@@ -38,6 +41,11 @@ pub struct RuntimeState {
     pub decisions: HashMap<String, DecisionSummary>,
     pub sessions: HashMap<String, SessionSummary>,
     pub recent_streams: Vec<StreamEventRecord>,
+}
+
+struct ActiveSessionControl {
+    agent_name: String,
+    stop: BackendStopSignal,
 }
 
 const MAX_RECENT_STREAMS: usize = 500;
@@ -110,6 +118,7 @@ pub async fn run_agentd(config: AppConfig) -> Result<()> {
         })),
         db: Arc::new(Mutex::new(db)),
         events_tx,
+        active_sessions: Arc::new(Mutex::new(HashMap::new())),
     };
 
     ensure_main_agent(&shared).await?;
@@ -367,6 +376,14 @@ async fn dispatch_control_request(
             Ok(ControlResponse::RoundResult { result })
         }
         ControlRequest::RunTaskRound { task_id } => run_task_round(&shared, &task_id).await,
+        ControlRequest::StopAgentSession { agent } => {
+            let session_id = stop_agent_session(&shared, &agent).await?;
+            Ok(ControlResponse::Ack {
+                message: format!(
+                    "stop requested for current session {session_id} on agent {agent}"
+                ),
+            })
+        }
         ControlRequest::CreateTask {
             from_agent,
             to_agent,
@@ -642,7 +659,12 @@ async fn run_agent_round(
             Ok(result)
         }
         Err(err) => {
-            set_agent_runtime_state(shared, agent_name, AgentSessionState::Blocked).await?;
+            let next_state = if is_session_stop_error(&err) {
+                AgentSessionState::Idle
+            } else {
+                AgentSessionState::Blocked
+            };
+            set_agent_runtime_state(shared, agent_name, next_state).await?;
             Err(err)
         }
     }
@@ -1249,6 +1271,33 @@ async fn set_agent_current_session(
     Ok(())
 }
 
+fn register_active_session(
+    shared: &AppShared,
+    session_id: &str,
+    agent_name: &str,
+    stop: BackendStopSignal,
+) {
+    let mut active = shared
+        .active_sessions
+        .lock()
+        .expect("active session mutex poisoned");
+    active.insert(
+        session_id.to_string(),
+        ActiveSessionControl {
+            agent_name: agent_name.to_string(),
+            stop,
+        },
+    );
+}
+
+fn unregister_active_session(shared: &AppShared, session_id: &str) {
+    let mut active = shared
+        .active_sessions
+        .lock()
+        .expect("active session mutex poisoned");
+    active.remove(session_id);
+}
+
 async fn update_session_thread_id(
     shared: &AppShared,
     session_id: &str,
@@ -1325,6 +1374,70 @@ async fn finalize_session_state(
     upsert_session_state(shared, updated, event_type).await?;
     set_agent_current_session(shared, &agent_name, None).await?;
     Ok(())
+}
+
+async fn stop_agent_session(shared: &AppShared, agent_name: &str) -> Result<String> {
+    let session_id = {
+        let state = shared.state.read().await;
+        let agent = state
+            .agents
+            .get(agent_name)
+            .ok_or_else(|| anyhow!("agent not registered: {agent_name}"))?;
+
+        agent
+            .current_session_id
+            .clone()
+            .ok_or_else(|| anyhow!("agent {agent_name} has no running session"))?
+    };
+
+    let control = {
+        let mut active = shared
+            .active_sessions
+            .lock()
+            .expect("active session mutex poisoned");
+        active.remove(&session_id)
+    };
+
+    let control = match control {
+        Some(control) => control,
+        None => {
+            let state = shared.state.read().await;
+            let session = state
+                .sessions
+                .get(&session_id)
+                .ok_or_else(|| anyhow!("session not found: {session_id}"))?;
+            if session.status == CodexSessionStatus::Running {
+                bail!(
+                    "session {session_id} is marked running but has no live stop handle; restart cleanup may have detached it"
+                );
+            }
+            bail!("session {session_id} is no longer running");
+        }
+    };
+
+    if control.agent_name != agent_name {
+        bail!(
+            "session {session_id} belongs to {}, not {agent_name}",
+            control.agent_name
+        );
+    }
+
+    control.stop.stop()?;
+    record_stream_event_with_session(
+        shared,
+        Some(&session_id),
+        agent_name,
+        "stdout",
+        "[SESSION_STOP_REQUESTED]",
+    )
+    .await?;
+
+    Ok(session_id)
+}
+
+fn is_session_stop_error(err: &anyhow::Error) -> bool {
+    err.to_string()
+        .contains("codex session stop requested for agent")
 }
 
 async fn recover_stale_sessions_on_startup(shared: &AppShared) -> Result<()> {
@@ -1553,6 +1666,7 @@ async fn execute_codex_round(
     let crate::backend::BackendHandle {
         session_mode,
         pid,
+        stop,
         mut events,
         completion,
     } = backend;
@@ -1570,6 +1684,7 @@ async fn execute_codex_round(
     };
     upsert_session_state(shared, session.clone(), "session_started").await?;
     set_agent_current_session(shared, &agent.name, Some(session.session_id.clone())).await?;
+    register_active_session(shared, &session.session_id, &agent.name, stop);
 
     while let Some(event) = events.recv().await {
         match event {
@@ -1604,6 +1719,7 @@ async fn execute_codex_round(
     let finished = completion
         .await
         .context("backend round task join failed")??;
+    unregister_active_session(shared, &session.session_id);
     finalize_session_state(
         shared,
         &session.session_id,
@@ -1615,6 +1731,10 @@ async fn execute_codex_round(
         Utc::now(),
     )
     .await?;
+
+    if finished.stopped {
+        bail!("codex session stop requested for agent {}", agent.name);
+    }
 
     if !finished.status.success() {
         let stderr_summary = finished

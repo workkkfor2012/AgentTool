@@ -106,6 +106,12 @@ Run one structured task round:
 F:\work\github\AgentTool\target\debug\agentctl.exe run-task-round --task T-REPLACE-ME
 ```
 
+Stop the current live session for an agent:
+
+```powershell
+F:\work\github\AgentTool\target\debug\agentctl.exe stop-agent-session --agent guardpro_factory
+```
+
 Acknowledge the latest pending decision for a task:
 
 ```powershell
@@ -193,6 +199,7 @@ Supported status values:
 
 - The current Codex backend is round-based, not PTY-based.
 - `src/backend.rs` already has the PTY dispatch point, but it currently returns `pty backend not implemented yet`.
+- `stop-agent-session` only works for a live session owned by the current `agentd` process. Recovered historical `running` records do not have a kill handle.
 - If Codex account limits are hit, `run-task-round` now surfaces the upstream readable error message instead of a generic exit-code failure.
 - Historical demo data in SQLite may show older agent states created before the latest state-release fixes.
 

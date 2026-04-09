@@ -116,6 +116,7 @@ This gives:
 - a stable `thread_id`
 - structured JSON output
 - deterministic per-round control
+- a live stop handle per in-process session, so `agentd` can terminate the running Codex child on request
 
 ### 5.2 Deferred v2
 
@@ -246,6 +247,7 @@ Current practical use:
 - No PTY-controlled long-lived Codex sessions yet
 - No dashboard action buttons yet
 - No richer policy engine beyond per-task auto resolution yet
+- Session stop currently works only for live sessions started by the current `agentd` process, not for recovered historical records
 - No stale-record cleanup command yet
 
 ## 12. Next implementation targets
