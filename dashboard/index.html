@@ -20,6 +20,7 @@
     }
 
     * { box-sizing: border-box; }
+
     body {
       margin: 0;
       font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
@@ -61,6 +62,7 @@
       margin: 0;
       color: var(--muted);
       font-size: 14px;
+      line-height: 1.5;
     }
 
     .panel {
@@ -70,6 +72,17 @@
       padding: 16px;
       backdrop-filter: blur(10px);
       box-shadow: 0 20px 60px rgba(0, 0, 0, 0.28);
+    }
+
+    .filter-panel {
+      margin-bottom: 18px;
+    }
+
+    .filter-grid {
+      display: grid;
+      grid-template-columns: auto auto minmax(220px, 1fr);
+      gap: 12px;
+      align-items: center;
     }
 
     .status-row {
@@ -89,6 +102,30 @@
       background: rgba(255, 255, 255, 0.03);
       font-size: 13px;
       color: var(--muted);
+    }
+
+    .toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 12px;
+      border-radius: 12px;
+      border: 1px solid var(--line);
+      background: var(--panel-2);
+      color: var(--text);
+      white-space: nowrap;
+    }
+
+    .toggle input {
+      width: auto;
+      margin: 0;
+      accent-color: var(--accent);
+    }
+
+    .meta {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.5;
     }
 
     .dot {
@@ -122,7 +159,7 @@
     }
 
     input {
-      width: 360px;
+      width: 100%;
       max-width: 100%;
     }
 
@@ -137,10 +174,25 @@
       gap: 18px;
     }
 
+    .section-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+
     h2 {
-      margin: 0 0 12px;
+      margin: 0;
       font-size: 16px;
       letter-spacing: 0.02em;
+    }
+
+    .count {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 500;
+      margin-left: 8px;
     }
 
     table {
@@ -164,6 +216,12 @@
     .mono {
       font-family: Consolas, "Cascadia Code", monospace;
       word-break: break-word;
+    }
+
+    .empty {
+      color: var(--muted);
+      text-align: center;
+      padding: 18px 8px;
     }
 
     .streams {
@@ -198,15 +256,21 @@
     }
 
     .state-idle { color: var(--good); }
-    .state-busy, .state-running, .state-accepted, .state-pending { color: var(--accent); }
+    .state-busy, .state-running, .state-accepted, .state-pending, .state-sent { color: var(--accent); }
     .state-reported, .state-analyzed, .state-decision_sent, .state-blocked_waiting_decision { color: var(--warn); }
     .state-blocked, .state-failed, .state-cancelled, .state-offline { color: var(--bad); }
-    .state-closed, .state-completed, .state-succeeded { color: var(--good); }
+    .state-closed, .state-completed, .state-succeeded, .state-acknowledged { color: var(--good); }
 
-    @media (max-width: 1100px) {
-      .topbar, .grid { grid-template-columns: 1fr; }
-      input { width: 100%; }
-      .streams { height: 360px; }
+    @media (max-width: 1200px) {
+      .topbar,
+      .grid,
+      .filter-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .streams {
+        height: 360px;
+      }
     }
   </style>
 </head>
@@ -215,12 +279,12 @@
     <div class="topbar">
       <div class="title">
         <h1>AgentTool Dashboard</h1>
-        <p>本地 Codex 主从编排面板。运行时数据只来自 WebSocket，不走 HTTP 快照接口。</p>
+        <p>本地多 Agent 只读观察面板。运行时数据全部来自 WebSocket 推送，操作仍然通过主 Agent 或 `agentctl` 完成。</p>
       </div>
       <div class="panel">
         <div class="status-row">
           <span class="pill"><span id="conn-dot" class="dot offline"></span><span id="conn-text">未连接</span></span>
-          <span class="pill">最近快照: <span id="snapshot-time">-</span></span>
+          <span class="pill">最近快照 <span id="snapshot-time">-</span></span>
         </div>
       </div>
       <div class="panel">
@@ -231,10 +295,30 @@
       </div>
     </div>
 
+    <section class="panel filter-panel">
+      <div class="section-head">
+        <h2>Filters</h2>
+        <div class="meta">只做筛选，不触发任何运行时操作。</div>
+      </div>
+      <div class="filter-grid">
+        <label class="toggle">
+          <input id="active-only" type="checkbox">
+          <span>只看 Active</span>
+        </label>
+        <label class="toggle">
+          <input id="hide-stderr" type="checkbox">
+          <span>隐藏 stderr</span>
+        </label>
+        <input id="search-input" type="text" placeholder="按 agent、task、decision、session 或 stream 内容筛选">
+      </div>
+    </section>
+
     <div class="grid">
       <div class="stack">
         <section class="panel">
-          <h2>Agents</h2>
+          <div class="section-head">
+            <h2>Agents <span id="agents-count" class="count"></span></h2>
+          </div>
           <table>
             <thead>
               <tr>
@@ -251,7 +335,9 @@
         </section>
 
         <section class="panel">
-          <h2>Decisions</h2>
+          <div class="section-head">
+            <h2>Decisions <span id="decisions-count" class="count"></span></h2>
+          </div>
           <table>
             <thead>
               <tr>
@@ -267,7 +353,9 @@
         </section>
 
         <section class="panel">
-          <h2>Sessions</h2>
+          <div class="section-head">
+            <h2>Sessions <span id="sessions-count" class="count"></span></h2>
+          </div>
           <table>
             <thead>
               <tr>
@@ -288,7 +376,9 @@
 
       <div class="stack">
         <section class="panel">
-          <h2>Tasks</h2>
+          <div class="section-head">
+            <h2>Tasks <span id="tasks-count" class="count"></span></h2>
+          </div>
           <table>
             <thead>
               <tr>
@@ -304,7 +394,9 @@
         </section>
 
         <section class="panel">
-          <h2>Streams</h2>
+          <div class="section-head">
+            <h2>Streams <span id="streams-count" class="count"></span></h2>
+          </div>
           <div id="streams" class="streams"></div>
         </section>
       </div>
@@ -312,6 +404,10 @@
   </div>
 
   <script>
+    const STORAGE_KEY = "agenttool.dashboard.filters.v1";
+    const STREAM_LIMIT = 240;
+    const TERMINAL_TASK_STATES = new Set(["closed", "cancelled", "failed"]);
+
     const state = {
       agents: new Map(),
       tasks: new Map(),
@@ -320,9 +416,8 @@
       streams: [],
       ws: null,
       reconnectTimer: null,
+      filters: loadFilters(),
     };
-
-    const STREAM_LIMIT = 240;
 
     const agentsBody = document.getElementById("agents-body");
     const tasksBody = document.getElementById("tasks-body");
@@ -334,6 +429,44 @@
     const snapshotTime = document.getElementById("snapshot-time");
     const wsUrlInput = document.getElementById("ws-url");
     const reconnectBtn = document.getElementById("reconnect-btn");
+    const activeOnlyInput = document.getElementById("active-only");
+    const hideStderrInput = document.getElementById("hide-stderr");
+    const searchInput = document.getElementById("search-input");
+    const agentsCount = document.getElementById("agents-count");
+    const tasksCount = document.getElementById("tasks-count");
+    const decisionsCount = document.getElementById("decisions-count");
+    const sessionsCount = document.getElementById("sessions-count");
+    const streamsCount = document.getElementById("streams-count");
+
+    syncFilterInputs();
+
+    function loadFilters() {
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if (!raw) {
+          return { activeOnly: false, hideStderr: false, search: "" };
+        }
+
+        const parsed = JSON.parse(raw);
+        return {
+          activeOnly: Boolean(parsed.activeOnly),
+          hideStderr: Boolean(parsed.hideStderr),
+          search: String(parsed.search || ""),
+        };
+      } catch (_) {
+        return { activeOnly: false, hideStderr: false, search: "" };
+      }
+    }
+
+    function saveFilters() {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state.filters));
+    }
+
+    function syncFilterInputs() {
+      activeOnlyInput.checked = state.filters.activeOnly;
+      hideStderrInput.checked = state.filters.hideStderr;
+      searchInput.value = state.filters.search;
+    }
 
     function fmtTime(value) {
       if (!value) return "-";
@@ -348,12 +481,140 @@
     }
 
     function stateClass(value) {
-      return `state-${String(value || "").replaceAll("_", "_")}`;
+      return `state-${String(value || "")}`;
+    }
+
+    function isTaskTerminal(task) {
+      return TERMINAL_TASK_STATES.has(String(task?.state || ""));
+    }
+
+    function agentIsActive(agent) {
+      return Boolean(agent.current_task_id || agent.current_session_id || agent.state !== "idle");
+    }
+
+    function taskIsActive(task) {
+      return !isTaskTerminal(task);
+    }
+
+    function sessionIsActive(session) {
+      return session.status === "running";
+    }
+
+    function decisionIsActive(decision) {
+      const task = state.tasks.get(decision.task_id);
+      return !decision.acknowledged_at || (task && !isTaskTerminal(task));
+    }
+
+    function buildSearchText(values) {
+      return values
+        .filter((value) => value !== null && value !== undefined)
+        .join(" ")
+        .toLowerCase();
+    }
+
+    function matchesSearch(values) {
+      const keyword = state.filters.search.trim().toLowerCase();
+      if (!keyword) return true;
+      return buildSearchText(values).includes(keyword);
+    }
+
+    function activeAgentNames() {
+      return new Set(
+        [...state.agents.values()]
+          .filter((agent) => agentIsActive(agent))
+          .map((agent) => agent.name)
+      );
+    }
+
+    function activeSessionIds() {
+      return new Set(
+        [...state.sessions.values()]
+          .filter((session) => sessionIsActive(session))
+          .map((session) => session.session_id)
+      );
+    }
+
+    function filteredAgents() {
+      return [...state.agents.values()]
+        .filter((agent) => !state.filters.activeOnly || agentIsActive(agent))
+        .filter((agent) => matchesSearch([
+          agent.name,
+          agent.role,
+          agent.state,
+          agent.current_task_id,
+          agent.current_session_id,
+          agent.thread_id,
+        ]))
+        .sort((a, b) => a.name.localeCompare(b.name));
+    }
+
+    function filteredTasks() {
+      return [...state.tasks.values()]
+        .filter((task) => !state.filters.activeOnly || taskIsActive(task))
+        .filter((task) => matchesSearch([
+          task.task_id,
+          task.from_agent,
+          task.to_agent,
+          task.title,
+          task.summary,
+          task.state,
+        ]))
+        .sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)));
+    }
+
+    function filteredDecisions() {
+      return [...state.decisions.values()]
+        .filter((decision) => !state.filters.activeOnly || decisionIsActive(decision))
+        .filter((decision) => matchesSearch([
+          decision.decision_id,
+          decision.task_id,
+          decision.issued_by,
+          decision.target_agent,
+          decision.status,
+          decision.summary,
+        ]))
+        .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+    }
+
+    function filteredSessions() {
+      return [...state.sessions.values()]
+        .filter((session) => !state.filters.activeOnly || sessionIsActive(session))
+        .filter((session) => matchesSearch([
+          session.session_id,
+          session.agent_name,
+          session.session_mode,
+          session.status,
+          session.pid,
+          session.thread_id,
+        ]))
+        .sort((a, b) => String(b.started_at).localeCompare(String(a.started_at)));
+    }
+
+    function filteredStreams() {
+      const activeAgents = activeAgentNames();
+      const activeSessions = activeSessionIds();
+
+      return state.streams
+        .filter((entry) => !state.filters.hideStderr || entry.stream !== "stderr")
+        .filter((entry) => {
+          if (!state.filters.activeOnly) return true;
+          return activeAgents.has(entry.agent) || activeSessions.has(entry.session_id);
+        })
+        .filter((entry) => matchesSearch([
+          entry.agent,
+          entry.stream,
+          entry.content,
+          entry.session_id,
+        ]));
+    }
+
+    function emptyRow(colspan, text) {
+      return `<tr><td class="empty" colspan="${colspan}">${esc(text)}</td></tr>`;
     }
 
     function renderAgents() {
-      const rows = [...state.agents.values()]
-        .sort((a, b) => a.name.localeCompare(b.name))
+      const all = [...state.agents.values()];
+      const rows = filteredAgents()
         .map((agent) => `
           <tr>
             <td class="mono">${esc(agent.name)}</td>
@@ -365,12 +626,15 @@
           </tr>
         `)
         .join("");
-      agentsBody.innerHTML = rows || `<tr><td colspan="6">暂无数据</td></tr>`;
+
+      agentsCount.textContent = `${rows ? filteredAgents().length : 0}/${all.length}`;
+      agentsBody.innerHTML = rows || emptyRow(6, state.filters.activeOnly ? "No active agents matched the current filters" : "No agent data");
     }
 
     function renderTasks() {
-      const rows = [...state.tasks.values()]
-        .sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)))
+      const all = [...state.tasks.values()];
+      const visible = filteredTasks();
+      const rows = visible
         .map((task) => `
           <tr>
             <td class="mono">${esc(task.task_id)}</td>
@@ -381,12 +645,15 @@
           </tr>
         `)
         .join("");
-      tasksBody.innerHTML = rows || `<tr><td colspan="5">暂无数据</td></tr>`;
+
+      tasksCount.textContent = `${visible.length}/${all.length}`;
+      tasksBody.innerHTML = rows || emptyRow(5, state.filters.activeOnly ? "No active tasks matched the current filters" : "No task data");
     }
 
     function renderDecisions() {
-      const rows = [...state.decisions.values()]
-        .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))
+      const all = [...state.decisions.values()];
+      const visible = filteredDecisions();
+      const rows = visible
         .map((decision) => `
           <tr>
             <td class="mono">${esc(decision.decision_id)}</td>
@@ -397,12 +664,15 @@
           </tr>
         `)
         .join("");
-      decisionsBody.innerHTML = rows || `<tr><td colspan="5">暂无数据</td></tr>`;
+
+      decisionsCount.textContent = `${visible.length}/${all.length}`;
+      decisionsBody.innerHTML = rows || emptyRow(5, state.filters.activeOnly ? "No active decisions matched the current filters" : "No decision data");
     }
 
     function renderSessions() {
-      const rows = [...state.sessions.values()]
-        .sort((a, b) => String(b.started_at).localeCompare(String(a.started_at)))
+      const all = [...state.sessions.values()];
+      const visible = filteredSessions();
+      const rows = visible
         .map((session) => `
           <tr>
             <td class="mono">${esc(session.session_id)}</td>
@@ -416,13 +686,15 @@
           </tr>
         `)
         .join("");
-      sessionsBody.innerHTML = rows || `<tr><td colspan="8">暂无数据</td></tr>`;
+
+      sessionsCount.textContent = `${visible.length}/${all.length}`;
+      sessionsBody.innerHTML = rows || emptyRow(8, state.filters.activeOnly ? "No active sessions matched the current filters" : "No session data");
     }
 
     function renderStreams() {
-      const html = state.streams
-        .slice()
-        .reverse()
+      const all = state.streams.slice();
+      const visible = filteredStreams().slice().reverse();
+      const html = visible
         .map((entry) => `
           <div class="stream-line">
             <div class="stream-head">
@@ -433,7 +705,9 @@
           </div>
         `)
         .join("");
-      streamsBox.innerHTML = html || `<div class="stream-line">暂无流事件</div>`;
+
+      streamsCount.textContent = `${visible.length}/${all.length}`;
+      streamsBox.innerHTML = html || `<div class="stream-line empty">${esc(state.filters.activeOnly || state.filters.hideStderr || state.filters.search ? "No streams matched the current filters" : "No stream data")}</div>`;
     }
 
     function renderAll() {
@@ -470,32 +744,30 @@
       switch (message.type) {
         case "snapshot":
           applySnapshot(message.snapshot);
-          break;
+          return;
         case "agent_state_changed":
           state.agents.set(message.agent.name, message.agent);
-          renderAgents();
           break;
         case "task_event":
           state.tasks.set(message.task.task_id, message.task);
-          renderTasks();
           break;
         case "decision_event":
           state.decisions.set(message.decision.decision_id, message.decision);
-          renderDecisions();
           break;
         case "session_event":
           state.sessions.set(message.session.session_id, message.session);
-          renderSessions();
           break;
         case "stream_chunk":
           pushStream(message.event);
-          renderStreams();
           break;
         case "pong":
-          break;
+          return;
         default:
           console.debug("unknown event", message);
+          return;
       }
+
+      renderAll();
     }
 
     function connect() {
@@ -504,18 +776,18 @@
       }
 
       const url = wsUrlInput.value.trim();
-      setConnection(false, "连接中...");
+      setConnection(false, "Connecting...");
 
       try {
         state.ws = new WebSocket(url);
       } catch (error) {
-        setConnection(false, `连接失败: ${error.message}`);
+        setConnection(false, `Connect failed: ${error.message}`);
         scheduleReconnect();
         return;
       }
 
       state.ws.addEventListener("open", () => {
-        setConnection(true, "已连接");
+        setConnection(true, "Connected");
         state.ws.send(JSON.stringify({ type: "request_snapshot" }));
       });
 
@@ -528,12 +800,12 @@
       });
 
       state.ws.addEventListener("close", () => {
-        setConnection(false, "连接断开");
+        setConnection(false, "Disconnected");
         scheduleReconnect();
       });
 
       state.ws.addEventListener("error", () => {
-        setConnection(false, "连接错误");
+        setConnection(false, "Connection error");
       });
     }
 
@@ -541,6 +813,24 @@
       clearTimeout(state.reconnectTimer);
       state.reconnectTimer = setTimeout(connect, 2000);
     }
+
+    function updateFilters(next) {
+      state.filters = { ...state.filters, ...next };
+      saveFilters();
+      renderAll();
+    }
+
+    activeOnlyInput.addEventListener("change", () => {
+      updateFilters({ activeOnly: activeOnlyInput.checked });
+    });
+
+    hideStderrInput.addEventListener("change", () => {
+      updateFilters({ hideStderr: hideStderrInput.checked });
+    });
+
+    searchInput.addEventListener("input", () => {
+      updateFilters({ search: searchInput.value });
+    });
 
     reconnectBtn.addEventListener("click", () => {
       clearTimeout(state.reconnectTimer);

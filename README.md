@@ -221,6 +221,7 @@ It renders:
 - decisions
 - sessions
 - recent stream events
+- read-only filters for active-only view, stderr hiding, and text search
 
 The initial snapshot now includes `sessions` and `recent_streams`, so the page does not need to wait for new log lines before showing context.
 Agents also expose their `current_session_id`, so the dashboard can show which live session is attached to which agent.

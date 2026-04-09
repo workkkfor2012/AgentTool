@@ -99,6 +99,7 @@ Responsibilities:
 
 - render current agents, tasks, decisions, and sessions
 - show recent stream activity
+- provide read-only filters for active-only view, stderr hiding, and text search
 - reconnect automatically
 - request a fresh snapshot when connected
 
