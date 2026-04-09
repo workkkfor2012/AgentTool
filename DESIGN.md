@@ -173,6 +173,7 @@ Operational recovery rule:
 
 - a `failed` or `cancelled` task may be explicitly retried back to `pending`
 - a blocked child agent must still be recovered separately unless the task cancel path already released it
+- a persisted `thread_id` may be explicitly reset only when the agent has no in-flight task and no live session
 
 ## 7. Structured task-round protocol
 

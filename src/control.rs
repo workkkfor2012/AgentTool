@@ -31,6 +31,9 @@ pub enum ControlRequest {
         task_id: String,
         requested_by: String,
     },
+    ResetAgentThread {
+        agent: String,
+    },
     RecoverAgent {
         agent: String,
     },

@@ -51,6 +51,10 @@ enum Command {
         #[arg(long)]
         requested_by: String,
     },
+    ResetAgentThread {
+        #[arg(long)]
+        agent: String,
+    },
     RecoverAgent {
         #[arg(long)]
         agent: String,
@@ -172,6 +176,7 @@ async fn main() -> Result<()> {
             task_id: task,
             requested_by,
         },
+        Command::ResetAgentThread { agent } => ControlRequest::ResetAgentThread { agent },
         Command::RecoverAgent { agent } => ControlRequest::RecoverAgent { agent },
         Command::StopAgentSession { agent } => ControlRequest::StopAgentSession { agent },
         Command::CreateTask {

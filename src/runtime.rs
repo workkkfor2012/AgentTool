@@ -390,6 +390,10 @@ async fn dispatch_control_request(
             let task = retry_task(&shared, &task_id, &requested_by).await?;
             Ok(ControlResponse::Task { task })
         }
+        ControlRequest::ResetAgentThread { agent } => {
+            let agent = reset_agent_thread(&shared, &agent).await?;
+            Ok(ControlResponse::Agent { agent })
+        }
         ControlRequest::RecoverAgent { agent } => {
             let agent = recover_agent(&shared, &agent).await?;
             Ok(ControlResponse::Agent { agent })
@@ -1755,6 +1759,47 @@ async fn recover_agent(shared: &AppShared, agent_name: &str) -> Result<AgentSumm
         })
         .ok();
     record_stream_event(shared, agent_name, "stdout", "[AGENT_RECOVERED]").await?;
+
+    Ok(updated)
+}
+
+async fn reset_agent_thread(shared: &AppShared, agent_name: &str) -> Result<AgentSummary> {
+    let mut updated = {
+        let state = shared.state.read().await;
+        state
+            .agents
+            .get(agent_name)
+            .cloned()
+            .ok_or_else(|| anyhow!("agent not registered: {agent_name}"))?
+    };
+
+    if updated.current_session_id.is_some() {
+        bail!("agent {agent_name} still has a live session and cannot reset thread");
+    }
+    if updated.current_task_id.is_some() {
+        bail!("agent {agent_name} still has an in-flight task and cannot reset thread");
+    }
+
+    updated.thread_id = None;
+    updated.last_heartbeat_at = Some(Utc::now());
+
+    {
+        let db = shared.db.lock().expect("db mutex poisoned");
+        db.upsert_agent(&updated)?;
+    }
+
+    {
+        let mut state = shared.state.write().await;
+        state.agents.insert(agent_name.to_string(), updated.clone());
+    }
+
+    shared
+        .events_tx
+        .send(DashboardEvent::AgentStateChanged {
+            agent: updated.clone(),
+        })
+        .ok();
+    record_stream_event(shared, agent_name, "stdout", "[THREAD_RESET]").await?;
 
     Ok(updated)
 }

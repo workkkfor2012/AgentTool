@@ -130,6 +130,12 @@ Recover a blocked agent after the failure has been handled:
 F:\work\github\AgentTool\target\debug\agentctl.exe recover-agent --agent guardpro_factory
 ```
 
+Reset a stored Codex thread binding for an idle or blocked agent with no live session:
+
+```powershell
+F:\work\github\AgentTool\target\debug\agentctl.exe reset-agent-thread --agent guardpro_factory
+```
+
 Acknowledge the latest pending decision for a task:
 
 ```powershell
@@ -161,6 +167,7 @@ F:\work\github\AgentTool\target\debug\agentctl.exe close-task --task T-REPLACE-M
 Blocked agents are now rejected for new task assignment and ad hoc rounds until they are explicitly recovered.
 `cancel-task` now gives the main agent an explicit abort path for non-live tasks and releases the child agent back to `idle`.
 `retry-task` now reopens `failed` or `cancelled` tasks as `pending` and reassigns them to the original child agent when that agent is idle.
+`reset-agent-thread` now clears a persisted `thread_id` without touching SQLite manually, as long as the agent has no live session and no in-flight task.
 
 ## Task lifecycle
 
@@ -223,6 +230,7 @@ Supported status values:
 - `cancel-task` refuses to touch a task that still has a live session attached; use `stop-agent-session` first.
 - `stop-agent-session` only works for a live session owned by the current `agentd` process. Recovered historical `running` records do not have a kill handle.
 - `recover-agent` only works when the agent has no in-flight task and no live session attached.
+- `reset-agent-thread` only works when the agent has no in-flight task and no live session attached.
 - If Codex account limits are hit, `run-task-round` now surfaces the upstream readable error message instead of a generic exit-code failure.
 - Historical demo data in SQLite may show older agent states created before the latest state-release fixes.
 
