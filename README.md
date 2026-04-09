@@ -22,7 +22,6 @@ Not implemented yet:
 
 - persistent PTY-backed visible Codex session windows controlled by `agentd`
 - direct stdin/stdout streaming into long-lived interactive Codex sessions
-- cleanup tooling for stale historical demo records
 
 ## Runtime model
 
@@ -222,6 +221,7 @@ It renders:
 - sessions
 - recent stream events
 - read-only filters for active-only view, stderr hiding, and text search
+- read-only inspector details for a selected agent, task, decision, session, or stream
 
 The initial snapshot now includes `sessions` and `recent_streams`, so the page does not need to wait for new log lines before showing context.
 Agents also expose their `current_session_id`, so the dashboard can show which live session is attached to which agent.

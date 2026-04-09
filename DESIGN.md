@@ -100,6 +100,7 @@ Responsibilities:
 - render current agents, tasks, decisions, and sessions
 - show recent stream activity
 - provide read-only filters for active-only view, stderr hiding, and text search
+- provide a read-only inspector for linked runtime details
 - reconnect automatically
 - request a fresh snapshot when connected
 
@@ -256,13 +257,13 @@ Current practical use:
 ## 11. Current limitations
 
 - No PTY-controlled long-lived Codex sessions yet
-- No dashboard action buttons yet
+- Dashboard remains intentionally read-only; it exposes filters and inspection only
 - No richer policy engine beyond per-task auto resolution yet
 - Task cancellation is deliberately conservative and does not preempt a live Codex child process; stop the session first, then cancel or retry
 - Session stop currently works only for live sessions started by the current `agentd` process, not for recovered historical records
 - Agent recovery is intentionally conservative: it only unlocks a `blocked` agent that has no in-flight task and no live session
 - Demo cleanup intentionally targets only known demo/probe agent names instead of arbitrary pattern-driven bulk deletion
-- No stale-record cleanup command yet
+- Cleanup and repair remain explicit operator actions, not background policy
 
 ## 12. Next implementation targets
 
@@ -271,4 +272,4 @@ Recommended next steps:
 1. add PTY-backed session management for visible Codex windows
 2. add main-agent to child-agent task dispatch built on top of current state machine
 3. observe the current per-task auto-resolution behavior before expanding it into a broader policy engine
-4. add cleanup and repair commands for stale agents/tasks
+4. continue tightening dashboard inspection and runtime recovery without adding dashboard-side control actions

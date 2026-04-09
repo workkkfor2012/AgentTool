@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -182,6 +182,13 @@
       margin-bottom: 12px;
     }
 
+    .section-copy {
+      margin: 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
     h2 {
       margin: 0;
       font-size: 16px;
@@ -211,6 +218,19 @@
     th {
       color: var(--muted);
       font-weight: 600;
+    }
+
+    tbody tr.selectable {
+      cursor: pointer;
+      transition: background 120ms ease;
+    }
+
+    tbody tr.selectable:hover td {
+      background: rgba(76, 201, 240, 0.08);
+    }
+
+    tbody tr.selected td {
+      background: rgba(76, 201, 240, 0.12);
     }
 
     .mono {
@@ -255,6 +275,139 @@
       line-height: 1.45;
     }
 
+    .stream-line.selectable {
+      cursor: pointer;
+      transition: border-color 120ms ease, background 120ms ease;
+    }
+
+    .stream-line.selectable:hover {
+      border-color: var(--accent);
+      background: rgba(76, 201, 240, 0.08);
+    }
+
+    .stream-line.selected {
+      border-color: var(--accent);
+      background: rgba(76, 201, 240, 0.12);
+    }
+
+    .inspector-panel {
+      margin-bottom: 18px;
+    }
+
+    .inspector-grid {
+      display: grid;
+      grid-template-columns: 1.1fr 0.9fr;
+      gap: 12px;
+    }
+
+    .detail-card {
+      border: 1px solid rgba(43, 58, 99, 0.75);
+      border-radius: 16px;
+      padding: 14px;
+      background: rgba(255, 255, 255, 0.03);
+      min-width: 0;
+    }
+
+    .detail-card h3 {
+      margin: 0 0 10px;
+      font-size: 14px;
+    }
+
+    .detail-card pre {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: Consolas, "Cascadia Code", monospace;
+      font-size: 12px;
+      line-height: 1.45;
+      color: var(--muted);
+    }
+
+    .detail-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .detail-row {
+      display: grid;
+      grid-template-columns: 120px minmax(0, 1fr);
+      gap: 10px;
+      align-items: start;
+    }
+
+    .detail-key {
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .detail-value {
+      min-width: 0;
+      word-break: break-word;
+    }
+
+    .detail-title {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 14px;
+    }
+
+    .detail-title h3 {
+      margin: 0;
+      font-size: 18px;
+    }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 9px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.05);
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    .related-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .related-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 7px 10px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: var(--panel-2);
+      color: var(--text);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    .related-pill.selectable {
+      cursor: pointer;
+      transition: border-color 120ms ease, transform 120ms ease;
+    }
+
+    .related-pill.selectable:hover {
+      border-color: var(--accent);
+      transform: translateY(-1px);
+    }
+
+    .inspector-empty {
+      color: var(--muted);
+      padding: 8px 0 2px;
+      line-height: 1.6;
+    }
+
     .state-idle { color: var(--good); }
     .state-busy, .state-running, .state-accepted, .state-pending, .state-sent { color: var(--accent); }
     .state-reported, .state-analyzed, .state-decision_sent, .state-blocked_waiting_decision { color: var(--warn); }
@@ -264,12 +417,18 @@
     @media (max-width: 1200px) {
       .topbar,
       .grid,
-      .filter-grid {
+      .filter-grid,
+      .inspector-grid {
         grid-template-columns: 1fr;
       }
 
       .streams {
         height: 360px;
+      }
+
+      .detail-row {
+        grid-template-columns: 1fr;
+        gap: 4px;
       }
     }
   </style>
@@ -279,18 +438,18 @@
     <div class="topbar">
       <div class="title">
         <h1>AgentTool Dashboard</h1>
-        <p>本地多 Agent 只读观察面板。运行时数据全部来自 WebSocket 推送，操作仍然通过主 Agent 或 `agentctl` 完成。</p>
+        <p>Local read-only view for the AgentTool runtime. Live state comes from WebSocket events, while all operational changes still go through the main agent or `agentctl`.</p>
       </div>
       <div class="panel">
         <div class="status-row">
-          <span class="pill"><span id="conn-dot" class="dot offline"></span><span id="conn-text">未连接</span></span>
-          <span class="pill">最近快照 <span id="snapshot-time">-</span></span>
+          <span class="pill"><span id="conn-dot" class="dot offline"></span><span id="conn-text">Disconnected</span></span>
+          <span class="pill">Last snapshot <span id="snapshot-time">-</span></span>
         </div>
       </div>
       <div class="panel">
         <div class="status-row">
           <input id="ws-url" value="ws://127.0.0.1:7080/ws" aria-label="WebSocket URL">
-          <button id="reconnect-btn" type="button">重连</button>
+          <button id="reconnect-btn" type="button">Reconnect</button>
         </div>
       </div>
     </div>
@@ -298,19 +457,27 @@
     <section class="panel filter-panel">
       <div class="section-head">
         <h2>Filters</h2>
-        <div class="meta">只做筛选，不触发任何运行时操作。</div>
+        <div class="meta">Filtering only. No runtime action is exposed here.</div>
       </div>
       <div class="filter-grid">
         <label class="toggle">
           <input id="active-only" type="checkbox">
-          <span>只看 Active</span>
+          <span>Active only</span>
         </label>
         <label class="toggle">
           <input id="hide-stderr" type="checkbox">
-          <span>隐藏 stderr</span>
+          <span>Hide stderr</span>
         </label>
-        <input id="search-input" type="text" placeholder="按 agent、task、decision、session 或 stream 内容筛选">
+        <input id="search-input" type="text" placeholder="Search agent, task, decision, session, or stream text">
       </div>
+    </section>
+
+    <section class="panel inspector-panel">
+      <div class="section-head">
+        <h2>Inspector</h2>
+        <p class="section-copy">Select any row or stream entry to inspect full runtime context and linked records.</p>
+      </div>
+      <div id="inspector"></div>
     </section>
 
     <div class="grid">
@@ -417,6 +584,7 @@
       ws: null,
       reconnectTimer: null,
       filters: loadFilters(),
+      selection: { kind: null, key: null },
     };
 
     const agentsBody = document.getElementById("agents-body");
@@ -424,6 +592,7 @@
     const decisionsBody = document.getElementById("decisions-body");
     const sessionsBody = document.getElementById("sessions-body");
     const streamsBox = document.getElementById("streams");
+    const inspectorBox = document.getElementById("inspector");
     const connDot = document.getElementById("conn-dot");
     const connText = document.getElementById("conn-text");
     const snapshotTime = document.getElementById("snapshot-time");
@@ -480,8 +649,31 @@
         .replaceAll(">", "&gt;");
     }
 
+    function escAttr(value) {
+      return esc(value)
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#39;");
+    }
+
     function stateClass(value) {
       return `state-${String(value || "")}`;
+    }
+
+    function kindLabel(kind) {
+      switch (kind) {
+        case "agent":
+          return "Agent";
+        case "task":
+          return "Task";
+        case "decision":
+          return "Decision";
+        case "session":
+          return "Session";
+        case "stream":
+          return "Stream";
+        default:
+          return kind;
+      }
     }
 
     function isTaskTerminal(task) {
@@ -516,6 +708,29 @@
       const keyword = state.filters.search.trim().toLowerCase();
       if (!keyword) return true;
       return buildSearchText(values).includes(keyword);
+    }
+
+    function streamKey(entry) {
+      const preview = String(entry.content || "").replace(/\s+/g, " ").slice(0, 96);
+      return [entry.at || "", entry.agent || "", entry.stream || "", entry.session_id || "", preview].join("|");
+    }
+
+    function isSelected(kind, key) {
+      return state.selection.kind === kind && state.selection.key === key;
+    }
+
+    function interactiveAttrs(kind, key, extraClasses = []) {
+      const classes = [...extraClasses, "selectable"];
+      if (isSelected(kind, key)) {
+        classes.push("selected");
+      }
+
+      return `class="${classes.join(" ")}" data-kind="${escAttr(kind)}" data-key="${escAttr(key)}"`;
+    }
+
+    function setSelection(kind, key) {
+      state.selection = { kind, key };
+      renderAll();
     }
 
     function activeAgentNames() {
@@ -612,11 +827,211 @@
       return `<tr><td class="empty" colspan="${colspan}">${esc(text)}</td></tr>`;
     }
 
+    function detailRow(label, value, extraClass = "") {
+      return `
+        <div class="detail-row">
+          <div class="detail-key">${esc(label)}</div>
+          <div class="detail-value ${extraClass}">${value}</div>
+        </div>
+      `;
+    }
+
+    function renderDetailFields(fields) {
+      return `<div class="detail-list">${fields.map((field) => detailRow(field.label, field.value, field.extraClass || "")).join("")}</div>`;
+    }
+
+    function relatedPill(label, kind = null, key = null) {
+      if (!kind || !key) {
+        return `<span class="related-pill">${esc(label)}</span>`;
+      }
+
+      return `<span ${interactiveAttrs(kind, key, ["related-pill"])}>${esc(label)}</span>`;
+    }
+
+    function maybeAgentPill(name, label) {
+      return state.agents.has(name) ? relatedPill(label, "agent", name) : relatedPill(label);
+    }
+
+    function renderRelatedList(items, emptyText) {
+      if (!items.length) {
+        return `<div class="inspector-empty">${esc(emptyText)}</div>`;
+      }
+
+      return `<div class="related-list">${items.join("")}</div>`;
+    }
+
+    function findSelectedRecord() {
+      const { kind, key } = state.selection;
+      if (!kind || !key) return null;
+
+      switch (kind) {
+        case "agent":
+          return state.agents.get(key) ? { kind, record: state.agents.get(key) } : null;
+        case "task":
+          return state.tasks.get(key) ? { kind, record: state.tasks.get(key) } : null;
+        case "decision":
+          return state.decisions.get(key) ? { kind, record: state.decisions.get(key) } : null;
+        case "session":
+          return state.sessions.get(key) ? { kind, record: state.sessions.get(key) } : null;
+        case "stream": {
+          const record = state.streams.find((entry) => streamKey(entry) === key);
+          return record ? { kind, record } : null;
+        }
+        default:
+          return null;
+      }
+    }
+
+    function ensureSelectionValid() {
+      if (!state.selection.kind || !state.selection.key) {
+        return;
+      }
+
+      if (!findSelectedRecord()) {
+        state.selection = { kind: null, key: null };
+      }
+    }
+
+    function renderInspector() {
+      const selected = findSelectedRecord();
+      if (!selected) {
+        inspectorBox.innerHTML = `<div class="inspector-empty">No selection yet. Click an agent, task, decision, session, or stream entry to inspect it here.</div>`;
+        return;
+      }
+
+      const { kind, record } = selected;
+      let title = "";
+      let subtitle = "";
+      let fields = [];
+      let related = [];
+
+      if (kind === "agent") {
+        const task = record.current_task_id ? state.tasks.get(record.current_task_id) : null;
+        const session = record.current_session_id ? state.sessions.get(record.current_session_id) : null;
+        title = record.name;
+        subtitle = "Agent runtime state";
+        fields = [
+          { label: "Role", value: esc(record.role) },
+          { label: "State", value: `<span class="${stateClass(record.state)}">${esc(record.state)}</span>` },
+          { label: "Repo", value: esc(record.repo_name || "-") },
+          { label: "CWD", value: `<span class="mono">${esc(record.cwd || "-")}</span>`, extraClass: "mono" },
+          { label: "Thread", value: `<span class="mono">${esc(record.thread_id || "-")}</span>`, extraClass: "mono" },
+          { label: "Current task", value: `<span class="mono">${esc(record.current_task_id || "-")}</span>`, extraClass: "mono" },
+          { label: "Current session", value: `<span class="mono">${esc(record.current_session_id || "-")}</span>`, extraClass: "mono" },
+          { label: "Last output", value: esc(fmtTime(record.last_output_at)) },
+          { label: "Heartbeat", value: esc(fmtTime(record.last_heartbeat_at)) },
+        ];
+        related = [
+          task ? relatedPill(`Task ${task.task_id}`, "task", task.task_id) : "",
+          session ? relatedPill(`Session ${session.session_id}`, "session", session.session_id) : "",
+        ].filter(Boolean);
+      } else if (kind === "task") {
+        const relatedDecisions = [...state.decisions.values()]
+          .filter((decision) => decision.task_id === record.task_id)
+          .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+        title = record.task_id;
+        subtitle = "Task state and assignment";
+        fields = [
+          { label: "State", value: `<span class="${stateClass(record.state)}">${esc(record.state)}</span>` },
+          { label: "Title", value: esc(record.title) },
+          { label: "Summary", value: esc(record.summary || "-") },
+          { label: "From", value: `<span class="mono">${esc(record.from_agent)}</span>`, extraClass: "mono" },
+          { label: "To", value: `<span class="mono">${esc(record.to_agent)}</span>`, extraClass: "mono" },
+          { label: "Auto resolve by", value: esc(record.auto_resolve_by || "-") },
+          { label: "Auto resolve summary", value: esc(record.auto_resolve_summary || "-") },
+          { label: "Created", value: esc(fmtTime(record.created_at)) },
+          { label: "Updated", value: esc(fmtTime(record.updated_at)) },
+          { label: "Closed", value: esc(fmtTime(record.closed_at)) },
+        ];
+        related = [
+          maybeAgentPill(record.to_agent, `Assignee ${record.to_agent}`),
+          maybeAgentPill(record.from_agent, `Sender ${record.from_agent}`),
+          ...relatedDecisions.map((decision) => relatedPill(`Decision ${decision.decision_id}`, "decision", decision.decision_id)),
+        ];
+      } else if (kind === "decision") {
+        title = record.decision_id;
+        subtitle = "Decision issued to a child agent";
+        fields = [
+          { label: "Status", value: `<span class="${stateClass(record.status)}">${esc(record.status)}</span>` },
+          { label: "Task", value: `<span class="mono">${esc(record.task_id)}</span>`, extraClass: "mono" },
+          { label: "Issued by", value: `<span class="mono">${esc(record.issued_by)}</span>`, extraClass: "mono" },
+          { label: "Target", value: `<span class="mono">${esc(record.target_agent)}</span>`, extraClass: "mono" },
+          { label: "Summary", value: esc(record.summary || "-") },
+          { label: "Created", value: esc(fmtTime(record.created_at)) },
+          { label: "Acknowledged", value: esc(fmtTime(record.acknowledged_at)) },
+        ];
+        related = [
+          relatedPill(`Task ${record.task_id}`, "task", record.task_id),
+          maybeAgentPill(record.target_agent, `Target ${record.target_agent}`),
+          maybeAgentPill(record.issued_by, `Issuer ${record.issued_by}`),
+        ];
+      } else if (kind === "session") {
+        const streamCount = state.streams.filter((entry) => entry.session_id === record.session_id).length;
+        title = record.session_id;
+        subtitle = "Live or historical Codex session";
+        fields = [
+          { label: "Agent", value: `<span class="mono">${esc(record.agent_name)}</span>`, extraClass: "mono" },
+          { label: "Mode", value: esc(record.session_mode) },
+          { label: "Status", value: `<span class="${stateClass(record.status)}">${esc(record.status)}</span>` },
+          { label: "PID", value: `<span class="mono">${esc(record.pid ?? "-")}</span>`, extraClass: "mono" },
+          { label: "Thread", value: `<span class="mono">${esc(record.thread_id || "-")}</span>`, extraClass: "mono" },
+          { label: "Started", value: esc(fmtTime(record.started_at)) },
+          { label: "Ended", value: esc(fmtTime(record.ended_at)) },
+          { label: "Last output", value: esc(fmtTime(record.last_output_at)) },
+          { label: "Visible streams", value: esc(String(streamCount)) },
+        ];
+        related = [
+          maybeAgentPill(record.agent_name, `Agent ${record.agent_name}`),
+        ];
+      } else if (kind === "stream") {
+        title = `${record.agent} / ${record.stream}`;
+        subtitle = "Recent stream event";
+        fields = [
+          { label: "Agent", value: `<span class="mono">${esc(record.agent)}</span>`, extraClass: "mono" },
+          { label: "Stream", value: esc(record.stream) },
+          { label: "Session", value: `<span class="mono">${esc(record.session_id || "-")}</span>`, extraClass: "mono" },
+          { label: "At", value: esc(fmtTime(record.at)) },
+          { label: "Content", value: `<pre>${esc(record.content || "")}</pre>` },
+        ];
+        related = [
+          maybeAgentPill(record.agent, `Agent ${record.agent}`),
+          record.session_id && state.sessions.has(record.session_id)
+            ? relatedPill(`Session ${record.session_id}`, "session", record.session_id)
+            : record.session_id
+              ? relatedPill(`Session ${record.session_id}`)
+              : "",
+        ].filter(Boolean);
+      }
+
+      inspectorBox.innerHTML = `
+        <div class="detail-title">
+          <span class="tag">${esc(kindLabel(kind))}</span>
+          <h3 class="mono">${esc(title)}</h3>
+          <span class="meta">${esc(subtitle)}</span>
+        </div>
+        <div class="inspector-grid">
+          <div class="detail-card">
+            <h3>Details</h3>
+            ${renderDetailFields(fields)}
+          </div>
+          <div class="detail-card">
+            <h3>Related</h3>
+            ${renderRelatedList(related, "No related runtime records found for this item.")}
+          </div>
+          <div class="detail-card" style="grid-column: 1 / -1;">
+            <h3>Raw JSON</h3>
+            <pre>${esc(JSON.stringify(record, null, 2))}</pre>
+          </div>
+        </div>
+      `;
+    }
+
     function renderAgents() {
       const all = [...state.agents.values()];
-      const rows = filteredAgents()
+      const visible = filteredAgents();
+      const rows = visible
         .map((agent) => `
-          <tr>
+          <tr ${interactiveAttrs("agent", agent.name)}>
             <td class="mono">${esc(agent.name)}</td>
             <td>${esc(agent.role)}</td>
             <td class="${stateClass(agent.state)}">${esc(agent.state)}</td>
@@ -627,7 +1042,7 @@
         `)
         .join("");
 
-      agentsCount.textContent = `${rows ? filteredAgents().length : 0}/${all.length}`;
+      agentsCount.textContent = `${visible.length}/${all.length}`;
       agentsBody.innerHTML = rows || emptyRow(6, state.filters.activeOnly ? "No active agents matched the current filters" : "No agent data");
     }
 
@@ -636,7 +1051,7 @@
       const visible = filteredTasks();
       const rows = visible
         .map((task) => `
-          <tr>
+          <tr ${interactiveAttrs("task", task.task_id)}>
             <td class="mono">${esc(task.task_id)}</td>
             <td class="mono">${esc(task.to_agent)}</td>
             <td class="${stateClass(task.state)}">${esc(task.state)}</td>
@@ -655,7 +1070,7 @@
       const visible = filteredDecisions();
       const rows = visible
         .map((decision) => `
-          <tr>
+          <tr ${interactiveAttrs("decision", decision.decision_id)}>
             <td class="mono">${esc(decision.decision_id)}</td>
             <td class="mono">${esc(decision.task_id)}</td>
             <td class="mono">${esc(decision.target_agent)}</td>
@@ -674,7 +1089,7 @@
       const visible = filteredSessions();
       const rows = visible
         .map((session) => `
-          <tr>
+          <tr ${interactiveAttrs("session", session.session_id)}>
             <td class="mono">${esc(session.session_id)}</td>
             <td class="mono">${esc(session.agent_name)}</td>
             <td class="mono">${esc(session.session_mode)}</td>
@@ -695,15 +1110,18 @@
       const all = state.streams.slice();
       const visible = filteredStreams().slice().reverse();
       const html = visible
-        .map((entry) => `
-          <div class="stream-line">
+        .map((entry) => {
+          const key = streamKey(entry);
+          return `
+          <div ${interactiveAttrs("stream", key, ["stream-line"])}>
             <div class="stream-head">
-              <span class="mono">${esc(entry.agent)} · ${esc(entry.stream)}</span>
+              <span class="mono">${esc(entry.agent)} / ${esc(entry.stream)}</span>
               <span>${fmtTime(entry.at)}</span>
             </div>
             <div class="stream-body">${esc(entry.content)}</div>
           </div>
-        `)
+        `;
+        })
         .join("");
 
       streamsCount.textContent = `${visible.length}/${all.length}`;
@@ -711,6 +1129,8 @@
     }
 
     function renderAll() {
+      ensureSelectionValid();
+      renderInspector();
       renderAgents();
       renderTasks();
       renderDecisions();
@@ -820,6 +1240,15 @@
       renderAll();
     }
 
+    function handleSelectableClick(event) {
+      const target = event.target.closest("[data-kind][data-key]");
+      if (!target) {
+        return;
+      }
+
+      setSelection(target.dataset.kind, target.dataset.key);
+    }
+
     activeOnlyInput.addEventListener("change", () => {
       updateFilters({ activeOnly: activeOnlyInput.checked });
     });
@@ -836,6 +1265,13 @@
       clearTimeout(state.reconnectTimer);
       connect();
     });
+
+    agentsBody.addEventListener("click", handleSelectableClick);
+    tasksBody.addEventListener("click", handleSelectableClick);
+    decisionsBody.addEventListener("click", handleSelectableClick);
+    sessionsBody.addEventListener("click", handleSelectableClick);
+    streamsBox.addEventListener("click", handleSelectableClick);
+    inspectorBox.addEventListener("click", handleSelectableClick);
 
     connect();
   </script>
