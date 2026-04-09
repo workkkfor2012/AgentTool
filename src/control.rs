@@ -15,6 +15,7 @@ pub enum ControlRequest {
         role: String,
         repo_name: Option<String>,
         cwd: String,
+        prompt_path: Option<String>,
     },
     RunAgentRound {
         agent: String,

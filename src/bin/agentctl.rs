@@ -28,6 +28,8 @@ enum Command {
         cwd: String,
         #[arg(long)]
         repo_name: Option<String>,
+        #[arg(long)]
+        prompt_path: Option<String>,
     },
     RunAgentRound {
         #[arg(long)]
@@ -168,11 +170,13 @@ async fn main() -> Result<()> {
             role,
             cwd,
             repo_name,
+            prompt_path,
         } => ControlRequest::RegisterAgent {
             name,
             role,
             repo_name,
             cwd,
+            prompt_path,
         },
         Command::RunAgentRound { agent, prompt } => ControlRequest::RunAgentRound { agent, prompt },
         Command::RunTaskRound { task } => ControlRequest::RunTaskRound { task_id: task },

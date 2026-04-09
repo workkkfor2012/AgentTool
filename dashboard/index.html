@@ -772,9 +772,22 @@
       );
     }
 
-    function latestDecisionForTask(taskId) {
+    function latestDecisionForTask(task) {
+      if (task.latest_decision_id) {
+        return state.decisions.get(task.latest_decision_id) || {
+          decision_id: task.latest_decision_id,
+          task_id: task.task_id,
+          issued_by: task.latest_decision_issued_by || "",
+          target_agent: task.to_agent,
+          summary: task.latest_decision_summary || "",
+          status: task.latest_decision_status || "",
+          created_at: task.latest_decision_at || null,
+          acknowledged_at: null,
+        };
+      }
+
       return [...state.decisions.values()]
-        .filter((decision) => decision.task_id === taskId)
+        .filter((decision) => decision.task_id === task.task_id)
         .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))[0] || null;
     }
 
@@ -873,7 +886,7 @@
         .map((task) => {
           const agent = state.agents.get(task.to_agent) || null;
           const session = sessionForTask(task, agent);
-          const decision = latestDecisionForTask(task.task_id);
+          const decision = latestDecisionForTask(task);
           const phase = communicationPhase(task, agent, session, decision);
           return { task, agent, session, decision, ...phase };
         })
@@ -885,6 +898,10 @@
           item.task.latest_child_summary,
           item.task.latest_child_topic,
           item.task.latest_child_details,
+          item.task.latest_decision_id,
+          item.task.latest_decision_summary,
+          item.task.latest_decision_status,
+          item.task.latest_decision_issued_by,
           item.task.from_agent,
           item.task.to_agent,
           item.phase,
@@ -903,6 +920,7 @@
         .filter((agent) => matchesSearch([
           agent.name,
           agent.role,
+          agent.prompt_path,
           agent.state,
           agent.current_task_id,
           agent.current_session_id,
@@ -920,6 +938,13 @@
           task.to_agent,
           task.title,
           task.summary,
+          task.latest_child_status,
+          task.latest_child_summary,
+          task.latest_child_topic,
+          task.latest_decision_id,
+          task.latest_decision_summary,
+          task.latest_decision_status,
+          task.latest_decision_issued_by,
           task.state,
         ]))
         .sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)));
@@ -1063,6 +1088,7 @@
           { label: "State", value: `<span class="${stateClass(record.state)}">${esc(record.state)}</span>` },
           { label: "Repo", value: esc(record.repo_name || "-") },
           { label: "CWD", value: `<span class="mono">${esc(record.cwd || "-")}</span>`, extraClass: "mono" },
+          { label: "Prompt path", value: `<span class="mono">${esc(record.prompt_path || "-")}</span>`, extraClass: "mono" },
           { label: "Thread", value: `<span class="mono">${esc(record.thread_id || "-")}</span>`, extraClass: "mono" },
           { label: "Current task", value: `<span class="mono">${esc(record.current_task_id || "-")}</span>`, extraClass: "mono" },
           { label: "Current session", value: `<span class="mono">${esc(record.current_session_id || "-")}</span>`, extraClass: "mono" },
@@ -1089,6 +1115,11 @@
           { label: "Latest child blocking", value: esc(record.latest_child_blocking || "-") },
           { label: "Latest child topic", value: esc(record.latest_child_topic || "-") },
           { label: "Latest child details", value: esc(record.latest_child_details || "-") },
+          { label: "Latest main decision", value: `<span class="mono">${esc(record.latest_decision_id || "-")}</span>`, extraClass: "mono" },
+          { label: "Latest main status", value: esc(record.latest_decision_status || "-") },
+          { label: "Latest main summary", value: esc(record.latest_decision_summary || "-") },
+          { label: "Latest main issuer", value: `<span class="mono">${esc(record.latest_decision_issued_by || "-")}</span>`, extraClass: "mono" },
+          { label: "Latest main at", value: esc(fmtTime(record.latest_decision_at)) },
           { label: "From", value: `<span class="mono">${esc(record.from_agent)}</span>`, extraClass: "mono" },
           { label: "To", value: `<span class="mono">${esc(record.to_agent)}</span>`, extraClass: "mono" },
           { label: "Auto resolve by", value: esc(record.auto_resolve_by || "-") },
@@ -1205,9 +1236,9 @@
               <div class="${stateClass(item.session?.status)}">${esc(item.session?.status || "-")}</div>
             </td>
             <td>
-              <div class="mono">${esc(item.decision?.decision_id || "-")}</div>
-              <div class="${stateClass(item.decision?.status)}">${esc(item.decision?.status || "-")}</div>
-              <div class="meta">${esc(item.decision?.summary || "-")}</div>
+              <div class="mono">${esc(item.task.latest_decision_id || item.decision?.decision_id || "-")}</div>
+              <div class="${stateClass(item.task.latest_decision_status || item.decision?.status)}">${esc(item.task.latest_decision_status || item.decision?.status || "-")}</div>
+              <div class="meta">${esc(item.task.latest_decision_summary || item.decision?.summary || "-")}</div>
             </td>
             <td>${fmtTime(item.task.updated_at)}</td>
           </tr>

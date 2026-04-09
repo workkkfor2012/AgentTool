@@ -17,6 +17,8 @@ Current implementation:
 - strict single in-flight task rule per child agent
 - task round schema enforcement for structured child-agent replies
 - readable upstream error extraction from Codex JSON events
+- agent-level `prompt_path` support with automatic discovery of `MAIN_AGENT_PROMPT.md` or `SUBAGENT_PROMPT.md` from each agent cwd
+- prompt-aware round composition that pulls in repo-local context such as `work.md` and `latest_reply.md` when present
 
 Not implemented yet:
 
@@ -80,6 +82,14 @@ Register a child agent:
 ```powershell
 F:\work\github\AgentTool\target\debug\agentctl.exe register-agent --name guardpro_factory --role child --cwd F:\work\github\hackman\guardpro_factory --repo-name guardpro_factory
 ```
+
+Optional prompt binding:
+
+```powershell
+F:\work\github\AgentTool\target\debug\agentctl.exe register-agent --name guardpro_factory --role child --cwd F:\work\github\hackman\guardpro_factory --repo-name guardpro_factory --prompt-path F:\work\github\hackman\guardpro_factory\SUBAGENT_PROMPT.md
+```
+
+If `--prompt-path` is omitted, `agentd` now auto-detects `SUBAGENT_PROMPT.md` for child agents and `MAIN_AGENT_PROMPT.md` for the built-in `main` agent when those files exist under the agent cwd.
 
 Run an ad hoc Codex round for a child agent:
 
@@ -181,8 +191,11 @@ F:\work\github\AgentTool\target\debug\agentctl.exe close-task --task T-REPLACE-M
 `send-decision` now keeps the same task open and returns it to `pending` for the next child round by default.
 `send-decision --close` now applies the decision, acknowledges it, closes the task, and releases the child agent in one round trip.
 `close-task` now auto-acknowledges the latest pending decision for that task before releasing the child agent.
+`run-agent-round` now prepends the configured agent prompt file to the round by telling Codex to read the prompt path first, instead of requiring the caller to inline the full role prompt manually.
 `run-task-round` now auto-resolves `report` and `wait_decision` tasks when the task was created with both `--auto-resolve-by` and `--auto-resolve-summary`.
-Each task now keeps the latest child-feedback summary, blocking level, topic, details, and completed round count, so the next child round can be prompted with fresh context instead of only the original task summary.
+`run-task-round` now acts as a transport adapter for repo-local prompt systems: it asks Codex to read the configured prompt file plus `work.md` and `latest_reply.md` when present, while still forcing the final stdout into the strict task-round JSON schema.
+Each task now keeps the latest child-feedback summary, blocking level, topic, details, and completed round count, and it also snapshots the latest main-agent decision id, summary, status, issuer, and issue time.
+That lets the next child round prompt and the dashboard read current communication context directly from the task record instead of recomputing it from decision history.
 Blocked agents are now rejected for new task assignment and ad hoc rounds until they are explicitly recovered.
 `cancel-task` now gives the main agent an explicit abort path for non-live tasks and releases the child agent back to `idle`.
 `retry-task` now reopens `failed` or `cancelled` tasks as `pending` and reassigns them to the original child agent when that agent is idle.
@@ -234,9 +247,9 @@ It renders:
 - read-only inspector details for a selected agent, task, decision, session, or stream
 
 The initial snapshot now includes `sessions` and `recent_streams`, so the page does not need to wait for new log lines before showing context.
-Agents also expose their `current_session_id`, so the dashboard can show which live session is attached to which agent.
+Agents now expose both `current_session_id` and `prompt_path`, so the dashboard can show which live session and prompt binding are attached to each agent.
 The dashboard now emphasizes live communication flow for open tasks instead of building a history replay workflow.
-Open-task rows now also surface the latest child-feedback summary and round count.
+Open-task rows now also surface the latest child-feedback summary, round count, and latest main decision snapshot.
 
 ## Structured task rounds
 
@@ -249,6 +262,8 @@ Supported status values:
 - `result`
 - `report`
 - `wait_decision`
+
+The daemon-side prompt wrapper lets a child repository keep its own human-oriented `[REPORT]` or `latest_reply.md` workflow, but the transport layer still requires the final round output to be one strict JSON object for AgentTool.
 
 ## Known limitations
 

@@ -364,6 +364,7 @@ mod tests {
             role: AgentRole::Child,
             repo_name: Some("repo".to_string()),
             cwd: ".".to_string(),
+            prompt_path: None,
             thread_id: None,
             current_session_id: None,
             state: AgentSessionState::Idle,

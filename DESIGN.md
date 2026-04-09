@@ -122,6 +122,7 @@ This gives:
 - structured JSON output
 - deterministic per-round control
 - a live stop handle per in-process session, so `agentd` can terminate the running Codex child on request
+- a prompt adapter layer, so repo-local role prompts can stay human-oriented while AgentTool still gets machine-readable round payloads
 
 ### 5.2 Deferred v2
 
@@ -144,11 +145,14 @@ Per agent:
 - `role`
 - `repo_name`
 - `cwd`
+- `prompt_path`
 - `thread_id`
 - `state`
 - `current_task_id`
 - `last_output_at`
 - `last_heartbeat_at`
+
+If `prompt_path` is not registered explicitly, `agentd` now auto-discovers `MAIN_AGENT_PROMPT.md` for the built-in `main` agent and `SUBAGENT_PROMPT.md` for child agents when those files exist under the agent cwd.
 
 ### 6.2 Task states
 
@@ -205,7 +209,9 @@ Supported `status` values:
 - `wait_decision`
 
 In the current workflow, a main-agent decision usually keeps the same task open and sends it back to `pending` for the next child round. Closing the task is explicit and separate.
-The task record also carries the latest child-feedback summary, blocking level, topic, details, and round count so the next round prompt can reuse current context directly.
+The task record also carries the latest child-feedback summary, blocking level, topic, details, and round count, plus a snapshot of the latest main-agent decision id, summary, status, issuer, and issue time.
+That keeps the current communication context attached to the task itself instead of forcing prompt construction or dashboard rendering to derive it from decision history each time.
+The task-round prompt wrapper now also tells Codex to read the configured repo-local prompt file plus `work.md` and `latest_reply.md` when present, then translate any human-readable report format back into the strict JSON transport schema.
 
 ## 8. Dashboard event model
 

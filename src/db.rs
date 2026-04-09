@@ -34,6 +34,7 @@ impl Database {
                 role TEXT NOT NULL,
                 repo_name TEXT,
                 cwd TEXT NOT NULL,
+                prompt_path TEXT,
                 thread_id TEXT,
                 current_session_id TEXT,
                 state TEXT NOT NULL,
@@ -70,6 +71,11 @@ impl Database {
                 latest_child_blocking TEXT,
                 latest_child_topic TEXT,
                 latest_child_details TEXT,
+                latest_decision_id TEXT,
+                latest_decision_summary TEXT,
+                latest_decision_status TEXT,
+                latest_decision_issued_by TEXT,
+                latest_decision_at TEXT,
                 state TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
@@ -108,6 +114,7 @@ impl Database {
             );
             "#,
         )?;
+        self.ensure_column("agents", "prompt_path", "TEXT")?;
         self.ensure_column("agents", "thread_id", "TEXT")?;
         self.ensure_column("agents", "current_session_id", "TEXT")?;
         self.ensure_column("tasks", "auto_resolve_by", "TEXT")?;
@@ -118,6 +125,11 @@ impl Database {
         self.ensure_column("tasks", "latest_child_blocking", "TEXT")?;
         self.ensure_column("tasks", "latest_child_topic", "TEXT")?;
         self.ensure_column("tasks", "latest_child_details", "TEXT")?;
+        self.ensure_column("tasks", "latest_decision_id", "TEXT")?;
+        self.ensure_column("tasks", "latest_decision_summary", "TEXT")?;
+        self.ensure_column("tasks", "latest_decision_status", "TEXT")?;
+        self.ensure_column("tasks", "latest_decision_issued_by", "TEXT")?;
+        self.ensure_column("tasks", "latest_decision_at", "TEXT")?;
         self.ensure_column("sessions", "session_mode", "TEXT NOT NULL DEFAULT 'round'")?;
         self.ensure_column("sessions", "thread_id", "TEXT")?;
         Ok(())
@@ -155,14 +167,15 @@ impl Database {
         self.conn.execute(
             r#"
             INSERT INTO agents (
-                id, name, role, repo_name, cwd, thread_id, current_session_id, state, current_task_id, last_output_at, last_heartbeat_at, created_at, updated_at
+                id, name, role, repo_name, cwd, prompt_path, thread_id, current_session_id, state, current_task_id, last_output_at, last_heartbeat_at, created_at, updated_at
             ) VALUES (
-                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14
             )
             ON CONFLICT(name) DO UPDATE SET
                 role = excluded.role,
                 repo_name = excluded.repo_name,
                 cwd = excluded.cwd,
+                prompt_path = excluded.prompt_path,
                 thread_id = excluded.thread_id,
                 current_session_id = excluded.current_session_id,
                 state = excluded.state,
@@ -177,6 +190,7 @@ impl Database {
                 serialize_role(&agent.role),
                 agent.repo_name,
                 agent.cwd,
+                agent.prompt_path,
                 agent.thread_id,
                 agent.current_session_id,
                 serialize_agent_state(&agent.state),
@@ -194,8 +208,8 @@ impl Database {
         self.conn.execute(
             r#"
             INSERT INTO tasks (
-                id, from_agent, to_agent, title, summary, auto_resolve_by, auto_resolve_summary, round_count, latest_child_status, latest_child_summary, latest_child_blocking, latest_child_topic, latest_child_details, state, created_at, updated_at, closed_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+                id, from_agent, to_agent, title, summary, auto_resolve_by, auto_resolve_summary, round_count, latest_child_status, latest_child_summary, latest_child_blocking, latest_child_topic, latest_child_details, latest_decision_id, latest_decision_summary, latest_decision_status, latest_decision_issued_by, latest_decision_at, state, created_at, updated_at, closed_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
             "#,
             params![
                 task.task_id,
@@ -211,6 +225,11 @@ impl Database {
                 task.latest_child_blocking,
                 task.latest_child_topic,
                 task.latest_child_details,
+                task.latest_decision_id,
+                task.latest_decision_summary,
+                task.latest_decision_status,
+                task.latest_decision_issued_by,
+                task.latest_decision_at.map(|dt| dt.to_rfc3339()),
                 serialize_task_state(&task.state),
                 task.created_at.to_rfc3339(),
                 task.updated_at.to_rfc3339(),
@@ -224,7 +243,7 @@ impl Database {
         self.conn.execute(
             r#"
             UPDATE tasks
-            SET round_count = ?2, latest_child_status = ?3, latest_child_summary = ?4, latest_child_blocking = ?5, latest_child_topic = ?6, latest_child_details = ?7, state = ?8, updated_at = ?9, closed_at = ?10
+            SET round_count = ?2, latest_child_status = ?3, latest_child_summary = ?4, latest_child_blocking = ?5, latest_child_topic = ?6, latest_child_details = ?7, latest_decision_id = ?8, latest_decision_summary = ?9, latest_decision_status = ?10, latest_decision_issued_by = ?11, latest_decision_at = ?12, state = ?13, updated_at = ?14, closed_at = ?15
             WHERE id = ?1
             "#,
             params![
@@ -235,6 +254,11 @@ impl Database {
                 task.latest_child_blocking,
                 task.latest_child_topic,
                 task.latest_child_details,
+                task.latest_decision_id,
+                task.latest_decision_summary,
+                task.latest_decision_status,
+                task.latest_decision_issued_by,
+                task.latest_decision_at.map(|dt| dt.to_rfc3339()),
                 serialize_task_state(&task.state),
                 task.updated_at.to_rfc3339(),
                 task.closed_at.map(|dt| dt.to_rfc3339()),
@@ -368,7 +392,7 @@ impl Database {
     pub fn load_agents(&self) -> Result<Vec<AgentSummary>> {
         let mut stmt = self.conn.prepare(
             r#"
-            SELECT name, role, repo_name, cwd, thread_id, current_session_id, state, current_task_id, last_output_at, last_heartbeat_at
+            SELECT name, role, repo_name, cwd, prompt_path, thread_id, current_session_id, state, current_task_id, last_output_at, last_heartbeat_at
             FROM agents
             ORDER BY name ASC
             "#,
@@ -380,12 +404,13 @@ impl Database {
                 role: parse_role(row.get::<_, String>(1)?),
                 repo_name: row.get(2)?,
                 cwd: row.get(3)?,
-                thread_id: row.get(4)?,
-                current_session_id: row.get(5)?,
-                state: parse_agent_state(row.get::<_, String>(6)?),
-                current_task_id: row.get(7)?,
-                last_output_at: parse_datetime(row.get(8)?),
-                last_heartbeat_at: parse_datetime(row.get(9)?),
+                prompt_path: row.get(4)?,
+                thread_id: row.get(5)?,
+                current_session_id: row.get(6)?,
+                state: parse_agent_state(row.get::<_, String>(7)?),
+                current_task_id: row.get(8)?,
+                last_output_at: parse_datetime(row.get(9)?),
+                last_heartbeat_at: parse_datetime(row.get(10)?),
             })
         })?;
 
@@ -464,7 +489,7 @@ impl Database {
     pub fn load_tasks(&self) -> Result<Vec<TaskSummary>> {
         let mut stmt = self.conn.prepare(
             r#"
-            SELECT id, from_agent, to_agent, title, summary, auto_resolve_by, auto_resolve_summary, round_count, latest_child_status, latest_child_summary, latest_child_blocking, latest_child_topic, latest_child_details, state, created_at, updated_at, closed_at
+            SELECT id, from_agent, to_agent, title, summary, auto_resolve_by, auto_resolve_summary, round_count, latest_child_status, latest_child_summary, latest_child_blocking, latest_child_topic, latest_child_details, latest_decision_id, latest_decision_summary, latest_decision_status, latest_decision_issued_by, latest_decision_at, state, created_at, updated_at, closed_at
             FROM tasks
             ORDER BY created_at ASC
             "#,
@@ -485,10 +510,15 @@ impl Database {
                 latest_child_blocking: row.get(10)?,
                 latest_child_topic: row.get(11)?,
                 latest_child_details: row.get(12)?,
-                state: parse_task_state(row.get::<_, String>(13)?),
-                created_at: parse_required_datetime(row.get(14)?)?,
-                updated_at: parse_required_datetime(row.get(15)?)?,
-                closed_at: parse_datetime(row.get(16)?),
+                latest_decision_id: row.get(13)?,
+                latest_decision_summary: row.get(14)?,
+                latest_decision_status: row.get(15)?,
+                latest_decision_issued_by: row.get(16)?,
+                latest_decision_at: parse_datetime(row.get(17)?),
+                state: parse_task_state(row.get::<_, String>(18)?),
+                created_at: parse_required_datetime(row.get(19)?)?,
+                updated_at: parse_required_datetime(row.get(20)?)?,
+                closed_at: parse_datetime(row.get(21)?),
             })
         })?;
 

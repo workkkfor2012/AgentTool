@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -122,6 +123,8 @@ pub async fn run_agentd(config: AppConfig) -> Result<()> {
         active_sessions: Arc::new(Mutex::new(HashMap::new())),
     };
 
+    sync_agent_prompt_defaults_on_startup(&shared).await?;
+    sync_task_latest_decision_fields_on_startup(&shared).await?;
     ensure_main_agent(&shared).await?;
     recover_stale_sessions_on_startup(&shared).await?;
     let ws_shared = shared.clone();
@@ -154,22 +157,37 @@ pub async fn run_agentd(config: AppConfig) -> Result<()> {
 }
 
 async fn ensure_main_agent(shared: &AppShared) -> Result<()> {
-    if shared.state.read().await.agents.contains_key("main") {
-        return Ok(());
-    }
-
-    let main_agent = AgentSummary {
+    let existing = shared.state.read().await.agents.get("main").cloned();
+    let main_cwd = detect_main_agent_cwd(&shared.config);
+    let main_prompt_path = default_prompt_path_for_role(&AgentRole::Main, &main_cwd)
+        .map(|path| path.to_string_lossy().to_string());
+    let mut main_agent = existing.clone().unwrap_or(AgentSummary {
         name: "main".to_string(),
         role: AgentRole::Main,
         repo_name: Some("hackman".to_string()),
-        cwd: ".".to_string(),
+        cwd: main_cwd.to_string_lossy().to_string(),
+        prompt_path: main_prompt_path.clone(),
         thread_id: None,
         current_session_id: None,
         state: AgentSessionState::Idle,
         current_task_id: None,
         last_output_at: None,
         last_heartbeat_at: Some(Utc::now()),
-    };
+    });
+
+    let mut changed = existing.is_none();
+    if main_agent.cwd == "." {
+        main_agent.cwd = main_cwd.to_string_lossy().to_string();
+        changed = true;
+    }
+    if main_agent.prompt_path.is_none() && main_prompt_path.is_some() {
+        main_agent.prompt_path = main_prompt_path;
+        changed = true;
+    }
+
+    if !changed {
+        return Ok(());
+    }
 
     {
         let db = shared.db.lock().expect("db mutex poisoned");
@@ -187,6 +205,99 @@ async fn ensure_main_agent(shared: &AppShared) -> Result<()> {
         .events_tx
         .send(DashboardEvent::AgentStateChanged { agent: main_agent })
         .ok();
+
+    Ok(())
+}
+
+fn detect_main_agent_cwd(config: &AppConfig) -> PathBuf {
+    let sibling_hackman = config
+        .root_dir
+        .parent()
+        .map(|parent| parent.join("hackman"));
+    match sibling_hackman {
+        Some(path) if path.is_dir() => path,
+        _ => config.root_dir.clone(),
+    }
+}
+
+fn default_prompt_path_for_role(role: &AgentRole, cwd: &Path) -> Option<PathBuf> {
+    let file_name = match role {
+        AgentRole::Main => "MAIN_AGENT_PROMPT.md",
+        AgentRole::Child => "SUBAGENT_PROMPT.md",
+    };
+    let path = cwd.join(file_name);
+    path.is_file().then_some(path)
+}
+
+fn normalize_prompt_path(
+    cwd: &str,
+    prompt_path: Option<String>,
+    role: &AgentRole,
+) -> Option<String> {
+    if let Some(prompt_path) = prompt_path {
+        let prompt = PathBuf::from(&prompt_path);
+        if prompt.is_absolute() {
+            return Some(prompt.to_string_lossy().to_string());
+        }
+        return Some(
+            PathBuf::from(cwd)
+                .join(prompt)
+                .to_string_lossy()
+                .to_string(),
+        );
+    }
+
+    default_prompt_path_for_role(role, Path::new(cwd))
+        .map(|path| path.to_string_lossy().to_string())
+}
+
+async fn sync_agent_prompt_defaults_on_startup(shared: &AppShared) -> Result<()> {
+    let updates = {
+        let state = shared.state.read().await;
+        state
+            .agents
+            .values()
+            .filter_map(|agent| {
+                let mut updated = agent.clone();
+                let mut changed = false;
+
+                if agent.name == "main" && agent.cwd == "." {
+                    updated.cwd = detect_main_agent_cwd(&shared.config)
+                        .to_string_lossy()
+                        .to_string();
+                    changed = true;
+                }
+
+                let normalized_prompt_path =
+                    normalize_prompt_path(&updated.cwd, updated.prompt_path.clone(), &updated.role);
+                if updated.prompt_path != normalized_prompt_path {
+                    updated.prompt_path = normalized_prompt_path;
+                    changed = true;
+                }
+
+                changed.then_some(updated)
+            })
+            .collect::<Vec<_>>()
+    };
+
+    if updates.is_empty() {
+        return Ok(());
+    }
+
+    {
+        let db = shared.db.lock().expect("db mutex poisoned");
+        for agent in &updates {
+            db.upsert_agent(agent)?;
+        }
+    }
+
+    {
+        let mut state = shared.state.write().await;
+        for agent in updates {
+            state.agents.insert(agent.name.clone(), agent);
+        }
+    }
+
     Ok(())
 }
 
@@ -333,18 +444,21 @@ async fn dispatch_control_request(
             role,
             repo_name,
             cwd,
+            prompt_path,
         } => {
             let role = match role.as_str() {
                 "main" => AgentRole::Main,
                 "child" => AgentRole::Child,
                 other => bail!("unsupported agent role: {other}"),
             };
+            let prompt_path = normalize_prompt_path(&cwd, prompt_path, &role);
 
             let agent = AgentSummary {
                 name: name.clone(),
                 role,
                 repo_name,
                 cwd,
+                prompt_path,
                 thread_id: None,
                 current_session_id: None,
                 state: AgentSessionState::Idle,
@@ -460,6 +574,11 @@ async fn dispatch_control_request(
                 latest_child_blocking: None,
                 latest_child_topic: None,
                 latest_child_details: None,
+                latest_decision_id: None,
+                latest_decision_summary: None,
+                latest_decision_status: None,
+                latest_decision_issued_by: None,
+                latest_decision_at: None,
                 state: TaskState::Pending,
                 created_at: now,
                 updated_at: now,
@@ -662,7 +781,8 @@ async fn run_agent_round(
 
     set_agent_runtime_state(shared, agent_name, AgentSessionState::Busy).await?;
 
-    let execution = execute_codex_round(shared, &agent, prompt, None).await;
+    let prompt = compose_agent_round_prompt(&agent, prompt);
+    let execution = execute_codex_round(shared, &agent, &prompt, None).await;
 
     match execution {
         Ok(result) => {
@@ -821,11 +941,87 @@ fn is_demo_agent_name(agent_name: &str) -> bool {
 }
 
 fn latest_decision_for_task(state: &RuntimeState, task_id: &str) -> Option<DecisionSummary> {
-    state.decisions
+    state
+        .decisions
         .values()
         .filter(|decision| decision.task_id == task_id)
         .max_by_key(|decision| decision.created_at)
         .cloned()
+}
+
+fn apply_latest_decision_fields(task: &mut TaskSummary, decision: Option<&DecisionSummary>) {
+    if let Some(decision) = decision {
+        task.latest_decision_id = Some(decision.decision_id.clone());
+        task.latest_decision_summary = Some(decision.summary.clone());
+        task.latest_decision_status = Some(decision.status.clone());
+        task.latest_decision_issued_by = Some(decision.issued_by.clone());
+        task.latest_decision_at = Some(decision.created_at.clone());
+    } else {
+        task.latest_decision_id = None;
+        task.latest_decision_summary = None;
+        task.latest_decision_status = None;
+        task.latest_decision_issued_by = None;
+        task.latest_decision_at = None;
+    }
+}
+
+fn task_latest_decision_is_current(task: &TaskSummary, decision: Option<&DecisionSummary>) -> bool {
+    match decision {
+        Some(decision) => {
+            task.latest_decision_id.as_deref() == Some(decision.decision_id.as_str())
+                && task.latest_decision_summary.as_deref() == Some(decision.summary.as_str())
+                && task.latest_decision_status.as_deref() == Some(decision.status.as_str())
+                && task.latest_decision_issued_by.as_deref() == Some(decision.issued_by.as_str())
+                && task.latest_decision_at == Some(decision.created_at.clone())
+        }
+        None => {
+            task.latest_decision_id.is_none()
+                && task.latest_decision_summary.is_none()
+                && task.latest_decision_status.is_none()
+                && task.latest_decision_issued_by.is_none()
+                && task.latest_decision_at.is_none()
+        }
+    }
+}
+
+async fn sync_task_latest_decision_fields_on_startup(shared: &AppShared) -> Result<()> {
+    let updates = {
+        let state = shared.state.read().await;
+        state
+            .tasks
+            .values()
+            .filter_map(|task| {
+                let latest_decision = latest_decision_for_task(&state, &task.task_id);
+                if task_latest_decision_is_current(task, latest_decision.as_ref()) {
+                    return None;
+                }
+
+                let mut updated = task.clone();
+                apply_latest_decision_fields(&mut updated, latest_decision.as_ref());
+                Some(updated)
+            })
+            .collect::<Vec<_>>()
+    };
+
+    if updates.is_empty() {
+        return Ok(());
+    }
+
+    {
+        let db = shared.db.lock().expect("db mutex poisoned");
+        for task in &updates {
+            db.update_task(task)?;
+        }
+    }
+
+    {
+        let mut state = shared.state.write().await;
+        for task in updates {
+            state.tasks.insert(task.task_id.clone(), task);
+        }
+    }
+
+    Ok(())
 }
 
 async fn broadcast_runtime_snapshot(shared: &AppShared) {
@@ -883,11 +1079,7 @@ async fn run_task_round(shared: &AppShared, task_id: &str) -> Result<ControlResp
     )
     .await?;
 
-    let latest_decision = {
-        let state = shared.state.read().await;
-        latest_decision_for_task(&state, &task.task_id)
-    };
-    let prompt = compose_task_prompt(&task, latest_decision.as_ref());
+    let prompt = compose_task_prompt(&agent, &task);
     let schema_path = shared
         .config
         .root_dir
@@ -1196,6 +1388,19 @@ async fn repair_runtime_state(shared: &AppShared, requested_by: &str) -> Result<
     let mut repaired_tasks = HashSet::new();
     let mut repaired_sessions = HashSet::new();
     let mut notes = Vec::new();
+    let latest_decisions_by_task = decisions.values().fold(
+        HashMap::<String, DecisionSummary>::new(),
+        |mut latest, decision| {
+            let should_replace = latest
+                .get(&decision.task_id)
+                .map(|current| current.created_at < decision.created_at)
+                .unwrap_or(true);
+            if should_replace {
+                latest.insert(decision.task_id.clone(), decision.clone());
+            }
+            latest
+        },
+    );
 
     for task in tasks.values_mut() {
         let mut changed = false;
@@ -1214,6 +1419,16 @@ async fn repair_runtime_state(shared: &AppShared, requested_by: &str) -> Result<
             notes.push(format!(
                 "task {} was non-terminal {:?} but had closed_at; cleared it",
                 task.task_id, original_state
+            ));
+        }
+
+        let latest_decision = latest_decisions_by_task.get(&task.task_id);
+        if !task_latest_decision_is_current(task, latest_decision) {
+            apply_latest_decision_fields(task, latest_decision);
+            changed = true;
+            notes.push(format!(
+                "task {} latest decision snapshot did not match decision ledger; synchronized task fields",
+                task.task_id
             ));
         }
 
@@ -1648,7 +1863,121 @@ async fn update_task_latest_child_feedback(
     Ok(updated)
 }
 
-fn compose_task_prompt(task: &TaskSummary, latest_decision: Option<&DecisionSummary>) -> String {
+async fn update_task_latest_main_decision(
+    shared: &AppShared,
+    task: &TaskSummary,
+    decision: Option<&DecisionSummary>,
+    event_type: &str,
+) -> Result<TaskSummary> {
+    if task_latest_decision_is_current(task, decision) {
+        return Ok(task.clone());
+    }
+
+    let mut updated = task.clone();
+    apply_latest_decision_fields(&mut updated, decision);
+    updated.updated_at = Utc::now();
+
+    {
+        let db = shared.db.lock().expect("db mutex poisoned");
+        db.update_task(&updated)?;
+    }
+
+    {
+        let mut state = shared.state.write().await;
+        state.tasks.insert(updated.task_id.clone(), updated.clone());
+    }
+
+    shared
+        .events_tx
+        .send(DashboardEvent::TaskEvent {
+            task: updated.clone(),
+            event_type: event_type.to_string(),
+        })
+        .ok();
+
+    Ok(updated)
+}
+
+fn display_agent_context_path(agent: &AgentSummary, path: &Path) -> String {
+    path.strip_prefix(&agent.cwd)
+        .map(|relative| relative.to_string_lossy().to_string())
+        .unwrap_or_else(|_| path.to_string_lossy().to_string())
+}
+
+fn existing_agent_context_files(agent: &AgentSummary) -> Vec<String> {
+    let mut files = Vec::new();
+    let mut seen = HashSet::new();
+
+    if let Some(prompt_path) = &agent.prompt_path {
+        let prompt_path = PathBuf::from(prompt_path);
+        if prompt_path.is_file() {
+            let display = display_agent_context_path(agent, &prompt_path);
+            if seen.insert(display.clone()) {
+                files.push(display);
+            }
+        }
+    }
+
+    for file_name in ["work.md", "latest_reply.md"] {
+        let path = Path::new(&agent.cwd).join(file_name);
+        if path.is_file() {
+            let display = display_agent_context_path(agent, &path);
+            if seen.insert(display.clone()) {
+                files.push(display);
+            }
+        }
+    }
+
+    files
+}
+
+fn compose_agent_context_prompt(agent: &AgentSummary) -> String {
+    let context_files = existing_agent_context_files(agent);
+    let missing_prompt_note = agent
+        .prompt_path
+        .as_ref()
+        .filter(|path| !Path::new(path).is_file())
+        .map(|path| {
+            format!(
+                "Configured agent prompt path was not found, so continue with repo discovery only: {path}\n\n"
+            )
+        })
+        .unwrap_or_default();
+
+    if context_files.is_empty() {
+        return format!(
+            "{missing_prompt_note}No agent-specific prompt file or context file was found automatically. Inspect the repository directly before acting.\n\n"
+        );
+    }
+
+    let files = context_files
+        .into_iter()
+        .map(|path| format!("- {path}\n"))
+        .collect::<String>();
+    format!(
+        "{missing_prompt_note}Before acting, read these repository files in order and treat them as the active role contract and local working context for this round:\n\
+{files}\n"
+    )
+}
+
+fn compose_agent_round_prompt(agent: &AgentSummary, request: &str) -> String {
+    let context_prompt = compose_agent_context_prompt(agent);
+    format!(
+        "You are operating as agent `{agent_name}` inside repository `{cwd}`.\n\
+Work only inside this repository unless the repo-local instructions explicitly tell you to inspect another local path.\n\
+\n\
+{context_prompt}\
+Round request:\n\
+{request}\n",
+        agent_name = agent.name,
+        cwd = agent.cwd,
+        context_prompt = context_prompt,
+        request = request,
+    )
+}
+
+fn compose_task_prompt(agent: &AgentSummary, task: &TaskSummary) -> String {
+    let context_prompt = compose_agent_context_prompt(agent);
     let latest_child_context = if task.round_count == 0 {
         "- latest_child_round: none\n".to_string()
     } else {
@@ -1668,21 +1997,35 @@ fn compose_task_prompt(task: &TaskSummary, latest_decision: Option<&DecisionSumm
         )
     };
 
-    let latest_decision_context = if let Some(decision) = latest_decision {
+    let latest_decision_context = if let Some(decision_id) = task.latest_decision_id.as_deref() {
         format!(
             "- latest_main_decision_id: {id}\n\
 - latest_main_decision_status: {status}\n\
-- latest_main_decision_summary: {summary}\n",
-            id = decision.decision_id,
-            status = decision.status,
-            summary = decision.summary,
+- latest_main_decision_summary: {summary}\n\
+- latest_main_decision_issued_by: {issued_by}\n\
+- latest_main_decision_at: {decision_at}\n",
+            id = decision_id,
+            status = task.latest_decision_status.as_deref().unwrap_or("-"),
+            summary = task.latest_decision_summary.as_deref().unwrap_or("-"),
+            issued_by = task.latest_decision_issued_by.as_deref().unwrap_or("-"),
+            decision_at = task
+                .latest_decision_at
+                .map(|dt| dt.to_rfc3339())
+                .unwrap_or_else(|| "-".to_string()),
         )
     } else {
         "- latest_main_decision: none\n".to_string()
     };
 
     format!(
-        "You are executing one repository-scoped task. Work only inside the current repository and do not assume cross-repo facts.\n\
+        "You are executing one repository-scoped task as child agent `{agent_name}`. Work only inside the current repository and do not assume cross-repo facts.\n\
+\n\
+{context_prompt}\
+Transport contract:\n\
+- Your repo-local prompt may ask for a human-readable `[REPORT]`, markdown summary, or `latest_reply.md` update. Do that repo-local work first when relevant.\n\
+- Your final stdout for this round must still be exactly one JSON object that matches the provided schema and nothing else.\n\
+- If you would normally answer with `[REPORT]`, translate that report into the JSON fields `summary`, `blocking`, `topic`, `details`, and `next_suggestion`.\n\
+- Use `status=wait_decision` only when you must stop before continuing. Use `status=report` when you can summarize a concrete gap or issue for the main agent to analyze.\n\
 \n\
 Return exactly one JSON object that matches the provided schema and nothing else.\n\
 \n\
@@ -1705,6 +2048,8 @@ Interpretation rules:\n\
 - If a latest main decision exists, treat it as the current instruction for this new round.\n\
 - Keep changed_files limited to files you actually changed in this repository.\n\
 - Do not wrap the JSON in markdown fences.\n",
+        agent_name = agent.name,
+        context_prompt = context_prompt,
         task_id = task.task_id,
         from_agent = task.from_agent,
         to_agent = task.to_agent,
@@ -1839,6 +2184,14 @@ async fn send_decision_to_task(
             .decisions
             .insert(decision.decision_id.clone(), decision.clone());
     }
+
+    update_task_latest_main_decision(
+        shared,
+        &task,
+        Some(&decision),
+        "task_latest_decision_updated",
+    )
+    .await?;
 
     shared
         .events_tx
@@ -1976,6 +2329,14 @@ async fn acknowledge_latest_decision_for_task_with_stream(
             .decisions
             .insert(updated.decision_id.clone(), updated.clone());
     }
+
+    update_task_latest_main_decision(
+        shared,
+        &task,
+        Some(&updated),
+        "task_latest_decision_updated",
+    )
+    .await?;
 
     shared
         .events_tx
@@ -2829,13 +3190,13 @@ async fn transition_impl(
 #[cfg(test)]
 mod tests {
     use super::{
-        compose_task_prompt, desired_agent_state_for_task, ensure_agent_ready_for_ad_hoc_round,
-        ensure_agent_ready_for_new_task, ensure_agent_ready_for_task_round,
+        compose_agent_round_prompt, compose_task_prompt, desired_agent_state_for_task,
+        ensure_agent_ready_for_ad_hoc_round, ensure_agent_ready_for_new_task,
+        ensure_agent_ready_for_task_round,
     };
-    use crate::models::{
-        AgentRole, AgentSessionState, AgentSummary, DecisionSummary, TaskState, TaskSummary,
-    };
+    use crate::models::{AgentRole, AgentSessionState, AgentSummary, TaskState, TaskSummary};
     use chrono::Utc;
+    use std::fs;
 
     fn sample_agent() -> AgentSummary {
         AgentSummary {
@@ -2843,6 +3204,7 @@ mod tests {
             role: AgentRole::Child,
             repo_name: Some("repo".to_string()),
             cwd: ".".to_string(),
+            prompt_path: None,
             thread_id: None,
             current_session_id: None,
             state: AgentSessionState::Idle,
@@ -2867,6 +3229,11 @@ mod tests {
             latest_child_blocking: None,
             latest_child_topic: None,
             latest_child_details: None,
+            latest_decision_id: None,
+            latest_decision_summary: None,
+            latest_decision_status: None,
+            latest_decision_issued_by: None,
+            latest_decision_at: None,
             state,
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -2917,7 +3284,10 @@ mod tests {
             TaskState::BlockedWaitingDecision,
         ] {
             let task = sample_task(task_state);
-            assert_eq!(desired_agent_state_for_task(&task), AgentSessionState::Blocked);
+            assert_eq!(
+                desired_agent_state_for_task(&task),
+                AgentSessionState::Blocked
+            );
         }
     }
 
@@ -2930,21 +3300,45 @@ mod tests {
         task.latest_child_blocking = Some("P1".to_string());
         task.latest_child_topic = Some("schema".to_string());
         task.latest_child_details = Some("Need the field contract".to_string());
+        task.latest_decision_id = Some("D-1".to_string());
+        task.latest_decision_summary = Some("Proceed with the new schema".to_string());
+        task.latest_decision_status = Some("acknowledged".to_string());
+        task.latest_decision_issued_by = Some("main".to_string());
+        task.latest_decision_at = Some(Utc::now());
 
-        let decision = DecisionSummary {
-            decision_id: "D-1".to_string(),
-            task_id: task.task_id.clone(),
-            issued_by: "main".to_string(),
-            target_agent: task.to_agent.clone(),
-            summary: "Proceed with the new schema".to_string(),
-            status: "acknowledged".to_string(),
-            created_at: Utc::now(),
-            acknowledged_at: Some(Utc::now()),
-        };
-
-        let prompt = compose_task_prompt(&task, Some(&decision));
+        let prompt = compose_task_prompt(&sample_agent(), &task);
         assert!(prompt.contains("latest_child_round: 2"));
         assert!(prompt.contains("latest_child_summary: Need input"));
         assert!(prompt.contains("latest_main_decision_summary: Proceed with the new schema"));
+        assert!(prompt.contains("latest_main_decision_issued_by: main"));
+    }
+
+    #[test]
+    fn agent_round_prompt_reads_repo_prompt_and_context_files() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "agenttool_prompt_test_{}",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        fs::create_dir_all(&temp_dir).expect("create temp dir");
+        fs::write(temp_dir.join("SUBAGENT_PROMPT.md"), "# role").expect("write prompt");
+        fs::write(temp_dir.join("work.md"), "current work").expect("write work");
+        fs::write(temp_dir.join("latest_reply.md"), "latest reply").expect("write reply");
+
+        let mut agent = sample_agent();
+        agent.cwd = temp_dir.to_string_lossy().to_string();
+        agent.prompt_path = Some(
+            temp_dir
+                .join("SUBAGENT_PROMPT.md")
+                .to_string_lossy()
+                .to_string(),
+        );
+
+        let prompt = compose_agent_round_prompt(&agent, "Continue the assigned role.");
+        assert!(prompt.contains("SUBAGENT_PROMPT.md"));
+        assert!(prompt.contains("work.md"));
+        assert!(prompt.contains("latest_reply.md"));
+        assert!(prompt.contains("Continue the assigned role."));
+
+        fs::remove_dir_all(&temp_dir).expect("cleanup temp dir");
     }
 }
