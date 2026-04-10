@@ -1919,7 +1919,7 @@ fn existing_agent_context_files(agent: &AgentSummary) -> Vec<PathBuf> {
         }
     }
 
-    for file_name in ["work.md", "latest_reply.md"] {
+    for file_name in ["work.md"] {
         let path = Path::new(&agent.cwd).join(file_name);
         if path.is_file() {
             let display = display_agent_context_path(agent, &path);
@@ -1960,7 +1960,7 @@ fn compose_agent_context_prompt(agent: &AgentSummary) -> Result<String> {
     }
 
     Ok(format!(
-        "{missing_prompt_note}The following repo-local context files are already loaded for this round. Treat them as the active role contract and working context. Do not spend time re-reading them unless you need to validate a change on disk.\n\n\
+        "{missing_prompt_note}The following repo-local context files are already loaded for this round. Treat them as the active role contract and long-lived working context. Real-time child/main communication is supplied separately through daemon task and decision state, not repo-local status files.\n\n\
 {blocks}"
     ))
 }
@@ -2027,7 +2027,8 @@ fn compose_task_prompt(agent: &AgentSummary, task: &TaskSummary) -> Result<Strin
 \n\
 {context_prompt}\
 Transport contract:\n\
-- Your repo-local prompt may ask for a human-readable `[REPORT]`, markdown summary, or `latest_reply.md` update. Do that repo-local work first when relevant.\n\
+- Your repo-local prompt may still ask for a human-readable `[REPORT]` or a repository progress-note update such as `work.md`. Treat those files as optional local workflow aids, not as the transport source of truth.\n\
+- The authoritative communication channel for this round is the structured JSON payload plus daemon-side task and decision state kept in memory and SQLite.\n\
 - Your final stdout for this round must still be exactly one JSON object that matches the provided schema and nothing else.\n\
 - If you would normally answer with `[REPORT]`, translate that report into the JSON fields `summary`, `blocking`, `topic`, `details`, and `next_suggestion`.\n\
 - Use `status=wait_decision` only when you must stop before continuing. Use `status=report` when you can summarize a concrete gap or issue for the main agent to analyze.\n\
@@ -3327,7 +3328,6 @@ mod tests {
         fs::create_dir_all(&temp_dir).expect("create temp dir");
         fs::write(temp_dir.join("SUBAGENT_PROMPT.md"), "# role").expect("write prompt");
         fs::write(temp_dir.join("work.md"), "current work").expect("write work");
-        fs::write(temp_dir.join("latest_reply.md"), "latest reply").expect("write reply");
 
         let mut agent = sample_agent();
         agent.cwd = temp_dir.to_string_lossy().to_string();
@@ -3342,10 +3342,8 @@ mod tests {
             .expect("compose agent round prompt");
         assert!(prompt.contains("SUBAGENT_PROMPT.md"));
         assert!(prompt.contains("work.md"));
-        assert!(prompt.contains("latest_reply.md"));
         assert!(prompt.contains("# role"));
         assert!(prompt.contains("current work"));
-        assert!(prompt.contains("latest reply"));
         assert!(prompt.contains("Continue the assigned role."));
 
         fs::remove_dir_all(&temp_dir).expect("cleanup temp dir");

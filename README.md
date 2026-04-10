@@ -18,7 +18,7 @@ Current implementation:
 - task round schema enforcement for structured child-agent replies
 - readable upstream error extraction from Codex JSON events
 - agent-level `prompt_path` support with automatic discovery of `MAIN_AGENT_PROMPT.md` or `SUBAGENT_PROMPT.md` from each agent cwd
-- prompt-aware round composition that pulls in repo-local context such as `work.md` and `latest_reply.md` when present
+- prompt-aware round composition that pulls in repo-local context such as `work.md` when present, while keeping live communication state in memory and SQLite
 
 Not implemented yet:
 
@@ -29,6 +29,7 @@ Not implemented yet:
 
 - Runtime truth lives in `agentd` memory.
 - SQLite is the durable event ledger, not the realtime transport.
+- Task and decision snapshots are the primary main/child communication channel.
 - Dashboard runtime data comes only from WebSocket events and snapshot messages.
 - A child agent cannot receive a new task until the previous task is fully `closed`.
 
@@ -193,7 +194,7 @@ F:\work\github\AgentTool\target\debug\agentctl.exe close-task --task T-REPLACE-M
 `close-task` now auto-acknowledges the latest pending decision for that task before releasing the child agent.
 `run-agent-round` now prepends the configured agent prompt file to the round by telling Codex to read the prompt path first, instead of requiring the caller to inline the full role prompt manually.
 `run-task-round` now auto-resolves `report` and `wait_decision` tasks when the task was created with both `--auto-resolve-by` and `--auto-resolve-summary`.
-`run-task-round` now acts as a transport adapter for repo-local prompt systems: it asks Codex to read the configured prompt file plus `work.md` and `latest_reply.md` when present, while still forcing the final stdout into the strict task-round JSON schema.
+`run-task-round` now acts as a transport adapter for repo-local prompt systems: it asks Codex to read the configured prompt file plus `work.md` when present, while still forcing the final stdout into the strict task-round JSON schema and carrying the latest child/main communication state in task snapshots.
 Each task now keeps the latest child-feedback summary, blocking level, topic, details, and completed round count, and it also snapshots the latest main-agent decision id, summary, status, issuer, and issue time.
 That lets the next child round prompt and the dashboard read current communication context directly from the task record instead of recomputing it from decision history.
 Blocked agents are now rejected for new task assignment and ad hoc rounds until they are explicitly recovered.
@@ -263,7 +264,7 @@ Supported status values:
 - `report`
 - `wait_decision`
 
-The daemon-side prompt wrapper lets a child repository keep its own human-oriented `[REPORT]` or `latest_reply.md` workflow, but the transport layer still requires the final round output to be one strict JSON object for AgentTool.
+The daemon-side prompt wrapper lets a child repository keep its own human-oriented `[REPORT]` and optional repo notes such as `work.md`, but the transport source of truth is the strict JSON round output plus daemon-side task and decision state in memory and SQLite.
 
 ## Known limitations
 

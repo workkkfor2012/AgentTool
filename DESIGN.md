@@ -211,7 +211,7 @@ Supported `status` values:
 In the current workflow, a main-agent decision usually keeps the same task open and sends it back to `pending` for the next child round. Closing the task is explicit and separate.
 The task record also carries the latest child-feedback summary, blocking level, topic, details, and round count, plus a snapshot of the latest main-agent decision id, summary, status, issuer, and issue time.
 That keeps the current communication context attached to the task itself instead of forcing prompt construction or dashboard rendering to derive it from decision history each time.
-The task-round prompt wrapper now also tells Codex to read the configured repo-local prompt file plus `work.md` and `latest_reply.md` when present, then translate any human-readable report format back into the strict JSON transport schema.
+The task-round prompt wrapper now also tells Codex to read the configured repo-local prompt file plus `work.md` when present, while the authoritative child/main communication state lives on the task and decision records held in memory and SQLite.
 
 ## 8. Dashboard event model
 

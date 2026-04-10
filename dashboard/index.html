@@ -410,9 +410,9 @@
 
     .state-idle { color: var(--good); }
     .state-busy, .state-running, .state-accepted, .state-pending, .state-sent { color: var(--accent); }
-    .state-reported, .state-analyzed, .state-decision_sent, .state-blocked_waiting_decision { color: var(--warn); }
+    .state-reported, .state-analyzed, .state-decision_sent, .state-blocked_waiting_decision, .state-report, .state-wait_decision { color: var(--warn); }
     .state-blocked, .state-failed, .state-cancelled, .state-offline { color: var(--bad); }
-    .state-closed, .state-completed, .state-succeeded, .state-acknowledged { color: var(--good); }
+    .state-closed, .state-completed, .state-succeeded, .state-acknowledged, .state-result { color: var(--good); }
 
     @media (max-width: 1200px) {
       .topbar,
@@ -483,17 +483,17 @@
     <section class="panel filter-panel">
       <div class="section-head">
         <h2>Live Communications <span id="communications-count" class="count"></span></h2>
-        <p class="section-copy">Current task handoff state between the main agent and child agents. This view stays focused on live work, not history replay.</p>
+        <p class="section-copy">Authoritative handoff state comes from live task, decision, and session snapshots held in memory and SQLite. Repo files are not part of this status view.</p>
       </div>
       <table>
         <thead>
           <tr>
             <th>Task</th>
-            <th>Phase</th>
+            <th>Child Signal</th>
             <th>Waiting On</th>
-            <th>Child</th>
-            <th>Session</th>
-            <th>Decision</th>
+            <th>Child Runtime</th>
+            <th>Main Decision</th>
+            <th>Lifecycle</th>
             <th>Updated</th>
           </tr>
         </thead>
@@ -566,13 +566,16 @@
         <section class="panel">
           <div class="section-head">
             <h2>Tasks <span id="tasks-count" class="count"></span></h2>
+            <p class="section-copy">Lifecycle is still visible here, but the table now prioritizes the latest child signal and main decision snapshot over file-oriented workflow hints.</p>
           </div>
           <table>
             <thead>
               <tr>
                 <th>ID</th>
                 <th>Target</th>
-                <th>State</th>
+                <th>Child Signal</th>
+                <th>Main Decision</th>
+                <th>Lifecycle</th>
                 <th>Title</th>
                 <th>Updated</th>
               </tr>
@@ -680,6 +683,14 @@
 
     function stateClass(value) {
       return `state-${String(value || "")}`;
+    }
+
+    function renderStateValue(value) {
+      const normalized = String(value || "-");
+      if (normalized === "-") {
+        return esc(normalized);
+      }
+      return `<span class="${stateClass(normalized)}">${esc(normalized)}</span>`;
     }
 
     function kindLabel(kind) {
@@ -799,6 +810,42 @@
       return state.sessions.get(agent.current_session_id) || null;
     }
 
+    function childSignal(task) {
+      if (task.latest_child_status) {
+        return {
+          status: task.latest_child_status,
+          summary: task.latest_child_summary || task.latest_child_topic || "-",
+          detail: task.latest_child_blocking || task.latest_child_details || "",
+        };
+      }
+
+      return {
+        status: "-",
+        summary: "No child feedback yet",
+        detail: "",
+      };
+    }
+
+    function decisionSignal(task, decision) {
+      const status = task.latest_decision_status || decision?.status || "";
+      const summary = task.latest_decision_summary || decision?.summary || "";
+      const issuer = task.latest_decision_issued_by || decision?.issued_by || "";
+
+      if (status) {
+        return {
+          status,
+          summary: summary || "-",
+          detail: issuer || "",
+        };
+      }
+
+      return {
+        status: "-",
+        summary: "No main decision yet",
+        detail: "",
+      };
+    }
+
     function communicationPhase(task, agent, session, decision) {
       switch (task.state) {
         case "pending":
@@ -888,7 +935,9 @@
           const session = sessionForTask(task, agent);
           const decision = latestDecisionForTask(task);
           const phase = communicationPhase(task, agent, session, decision);
-          return { task, agent, session, decision, ...phase };
+          const child = childSignal(task);
+          const main = decisionSignal(task, decision);
+          return { task, agent, session, decision, child, main, ...phase };
         })
         .filter((item) => matchesSearch([
           item.task.task_id,
@@ -1100,24 +1149,33 @@
           session ? relatedPill(`Session ${session.session_id}`, "session", session.session_id) : "",
         ].filter(Boolean);
       } else if (kind === "task") {
+        const agent = state.agents.get(record.to_agent) || null;
+        const session = sessionForTask(record, agent);
+        const decision = latestDecisionForTask(record);
+        const phase = communicationPhase(record, agent, session, decision);
+        const child = childSignal(record);
+        const main = decisionSignal(record, decision);
         const relatedDecisions = [...state.decisions.values()]
           .filter((decision) => decision.task_id === record.task_id)
           .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
         title = record.task_id;
-        subtitle = "Task state and assignment";
+        subtitle = "Communication-first task view";
         fields = [
-          { label: "State", value: `<span class="${stateClass(record.state)}">${esc(record.state)}</span>` },
+          { label: "Communication phase", value: `<span class="mono">${esc(phase.phase)}</span>`, extraClass: "mono" },
+          { label: "Waiting on", value: esc(phase.waitingOn) },
+          { label: "Communication note", value: esc(phase.note) },
+          { label: "Lifecycle state", value: renderStateValue(record.state) },
           { label: "Title", value: esc(record.title) },
           { label: "Summary", value: esc(record.summary || "-") },
           { label: "Round count", value: esc(String(record.round_count ?? 0)) },
-          { label: "Latest child status", value: esc(record.latest_child_status || "-") },
-          { label: "Latest child summary", value: esc(record.latest_child_summary || "-") },
+          { label: "Latest child status", value: renderStateValue(child.status) },
+          { label: "Latest child summary", value: esc(child.summary) },
           { label: "Latest child blocking", value: esc(record.latest_child_blocking || "-") },
           { label: "Latest child topic", value: esc(record.latest_child_topic || "-") },
           { label: "Latest child details", value: esc(record.latest_child_details || "-") },
           { label: "Latest main decision", value: `<span class="mono">${esc(record.latest_decision_id || "-")}</span>`, extraClass: "mono" },
-          { label: "Latest main status", value: esc(record.latest_decision_status || "-") },
-          { label: "Latest main summary", value: esc(record.latest_decision_summary || "-") },
+          { label: "Latest main status", value: renderStateValue(main.status) },
+          { label: "Latest main summary", value: esc(main.summary) },
           { label: "Latest main issuer", value: `<span class="mono">${esc(record.latest_decision_issued_by || "-")}</span>`, extraClass: "mono" },
           { label: "Latest main at", value: esc(fmtTime(record.latest_decision_at)) },
           { label: "From", value: `<span class="mono">${esc(record.from_agent)}</span>`, extraClass: "mono" },
@@ -1222,23 +1280,24 @@
               <div class="meta">round ${esc(String(item.task.round_count ?? 0))}</div>
             </td>
             <td>
-              <div class="mono">${esc(item.phase)}</div>
-              <div class="meta">${esc(item.note)}</div>
-              <div class="meta">${esc(item.task.latest_child_status ? `${item.task.latest_child_status}: ${item.task.latest_child_summary || "-"}` : "No child feedback yet")}</div>
+              <div>${renderStateValue(item.child.status)}</div>
+              <div class="meta">${esc(item.child.summary)}</div>
+              <div class="meta">${esc(item.child.detail || "-")}</div>
             </td>
             <td class="mono">${esc(item.waitingOn)}</td>
             <td>
               <div class="mono">${esc(item.task.to_agent)}</div>
               <div class="${stateClass(item.agent?.state)}">${esc(item.agent?.state || "-")}</div>
+              <div class="meta">${esc(item.session?.status ? `${item.session.status} / ${item.session.session_id}` : "no live session")}</div>
             </td>
             <td>
-              <div class="mono">${esc(item.session?.session_id || "-")}</div>
-              <div class="${stateClass(item.session?.status)}">${esc(item.session?.status || "-")}</div>
+              <div>${renderStateValue(item.main.status)}</div>
+              <div class="meta">${esc(item.main.summary)}</div>
+              <div class="meta">${esc(item.task.latest_decision_id || item.decision?.decision_id || "-")}</div>
             </td>
             <td>
-              <div class="mono">${esc(item.task.latest_decision_id || item.decision?.decision_id || "-")}</div>
-              <div class="${stateClass(item.task.latest_decision_status || item.decision?.status)}">${esc(item.task.latest_decision_status || item.decision?.status || "-")}</div>
-              <div class="meta">${esc(item.task.latest_decision_summary || item.decision?.summary || "-")}</div>
+              <div class="mono">${esc(item.phase)}</div>
+              <div class="meta">${esc(item.note)}</div>
             </td>
             <td>${fmtTime(item.task.updated_at)}</td>
           </tr>
@@ -1273,19 +1332,39 @@
       const all = [...state.tasks.values()];
       const visible = filteredTasks();
       const rows = visible
-        .map((task) => `
+        .map((task) => {
+          const agent = state.agents.get(task.to_agent) || null;
+          const session = sessionForTask(task, agent);
+          const decision = latestDecisionForTask(task);
+          const phase = communicationPhase(task, agent, session, decision);
+          const child = childSignal(task);
+          const main = decisionSignal(task, decision);
+
+          return `
           <tr ${interactiveAttrs("task", task.task_id)}>
             <td class="mono">${esc(task.task_id)}</td>
             <td class="mono">${esc(task.to_agent)}</td>
-            <td class="${stateClass(task.state)}">${esc(task.state)}</td>
+            <td>
+              <div>${renderStateValue(child.status)}</div>
+              <div class="meta">${esc(child.summary)}</div>
+            </td>
+            <td>
+              <div>${renderStateValue(main.status)}</div>
+              <div class="meta">${esc(main.summary)}</div>
+            </td>
+            <td>
+              <div>${renderStateValue(task.state)}</div>
+              <div class="meta">${esc(phase.phase)}</div>
+            </td>
             <td>${esc(task.title)}</td>
             <td>${fmtTime(task.updated_at)}</td>
           </tr>
-        `)
+        `;
+        })
         .join("");
 
       tasksCount.textContent = `${visible.length}/${all.length}`;
-      tasksBody.innerHTML = rows || emptyRow(5, state.filters.activeOnly ? "No active tasks matched the current filters" : "No task data");
+      tasksBody.innerHTML = rows || emptyRow(7, state.filters.activeOnly ? "No active tasks matched the current filters" : "No task data");
     }
 
     function renderDecisions() {
