@@ -1,13 +1,19 @@
+use std::path::Path;
 use std::process::ExitStatus;
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::models::{AgentRoundResult, AgentSummary, SessionMode};
+
+const SERVBAY_CODEX_SHIM: &str = r"F:\work\useful\ServBay\packages\node\current\codex";
+const SERVBAY_NODE_EXE: &str = r"F:\work\useful\ServBay\packages\node\current\node.exe";
+const SERVBAY_CODEX_JS: &str =
+    r"F:\work\useful\ServBay\packages\node\current\node_modules\@openai\codex\bin\codex.js";
 
 pub struct BackendStartRequest {
     pub agent: AgentSummary,
@@ -133,16 +139,15 @@ pub fn start_backend(request: BackendStartRequest) -> Result<BackendHandle> {
 }
 
 fn start_round_backend(request: BackendStartRequest) -> Result<BackendHandle> {
-    let mut command = build_codex_round_command(
-        &request.agent,
-        &request.prompt,
-        request.output_schema.as_deref(),
-    );
+    let mut command = build_codex_round_command(&request.agent, request.output_schema.as_deref());
 
     let mut child = command
         .spawn()
         .with_context(|| format!("failed to spawn codex for agent {}", request.agent.name))?;
     let pid = child.id();
+    let stdin = child.stdin.take().ok_or_else(|| {
+        anyhow::anyhow!("failed to capture stdin for agent {}", request.agent.name)
+    })?;
 
     let stdout = child.stdout.take().ok_or_else(|| {
         anyhow::anyhow!("failed to capture stdout for agent {}", request.agent.name)
@@ -154,10 +159,12 @@ fn start_round_backend(request: BackendStartRequest) -> Result<BackendHandle> {
     let (tx, rx) = mpsc::channel(256);
     let (stop_tx, mut stop_rx) = oneshot::channel();
     let existing_thread_id = request.agent.thread_id.clone();
+    let prompt = request.prompt;
 
     let completion = tokio::spawn(async move {
         let stdout_tx = tx.clone();
         let stderr_tx = tx.clone();
+        let stdin_task = tokio::spawn(async move { write_prompt_to_stdin(stdin, &prompt).await });
 
         let stdout_task =
             tokio::spawn(
@@ -175,6 +182,7 @@ fn start_round_backend(request: BackendStartRequest) -> Result<BackendHandle> {
                 (status, true)
             }
         };
+        stdin_task.await.context("stdin task join failed")??;
         let parsed = stdout_task.await.context("stdout task join failed")??;
         let stderr_lines = stderr_task.await.context("stderr task join failed")??;
 
@@ -197,29 +205,30 @@ fn start_round_backend(request: BackendStartRequest) -> Result<BackendHandle> {
     })
 }
 
-pub fn build_codex_round_command(
-    agent: &AgentSummary,
-    prompt: &str,
-    output_schema: Option<&str>,
-) -> Command {
-    let mut command = Command::new("codex");
+pub fn build_codex_round_command(agent: &AgentSummary, output_schema: Option<&str>) -> Command {
+    let mut command = preferred_codex_command();
+    command.args(["-a", "never"]);
     if let Some(thread_id) = &agent.thread_id {
         command.args([
             "exec",
             "resume",
             "--json",
+            "--sandbox",
+            "workspace-write",
             "--skip-git-repo-check",
             thread_id,
-            prompt,
+            "-",
         ]);
     } else {
         command.args([
             "exec",
             "--json",
+            "--sandbox",
+            "workspace-write",
             "--skip-git-repo-check",
             "--cd",
             &agent.cwd,
-            prompt,
+            "-",
         ]);
     }
 
@@ -227,9 +236,39 @@ pub fn build_codex_round_command(
         command.args(["--output-schema", schema_path]);
     }
 
+    command.stdin(std::process::Stdio::piped());
     command.stdout(std::process::Stdio::piped());
     command.stderr(std::process::Stdio::piped());
     command
+}
+
+fn preferred_codex_command() -> Command {
+    if Path::new(SERVBAY_CODEX_SHIM).is_file()
+        && Path::new(SERVBAY_NODE_EXE).is_file()
+        && Path::new(SERVBAY_CODEX_JS).is_file()
+    {
+        // The PATH-leading ServBay `codex` is a POSIX shell shim.
+        // Spawn the same package through node directly so Windows can launch it reliably.
+        let mut command = Command::new(SERVBAY_NODE_EXE);
+        command.arg(SERVBAY_CODEX_JS);
+        return command;
+    }
+
+    Command::new("codex")
+}
+
+async fn write_prompt_to_stdin(mut stdin: tokio::process::ChildStdin, prompt: &str) -> Result<()> {
+    match stdin.write_all(prompt.as_bytes()).await {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => return Ok(()),
+        Err(err) => return Err(err).context("failed to write prompt to codex stdin"),
+    }
+
+    match stdin.shutdown().await {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        Err(err) => Err(err).context("failed to close codex stdin"),
+    }
 }
 
 async fn parse_codex_stdout(
@@ -318,7 +357,10 @@ fn extract_item_text<'a>(item: &'a serde_json::Value) -> Option<&'a str> {
 mod tests {
     use crate::models::{AgentRole, AgentSessionState, AgentSummary, SessionMode};
 
-    use super::{BackendStartRequest, BackendStream, ParsedCodexRound, start_backend};
+    use super::{
+        BackendStartRequest, BackendStream, ParsedCodexRound, build_codex_round_command,
+        start_backend,
+    };
 
     #[test]
     fn ingests_thread_started_and_completed_item() {
@@ -355,6 +397,37 @@ mod tests {
     fn backend_stream_variants_are_stable() {
         assert!(matches!(BackendStream::Stdout, BackendStream::Stdout));
         assert!(matches!(BackendStream::Stderr, BackendStream::Stderr));
+    }
+
+    #[test]
+    fn round_command_uses_workspace_write_and_stdin_prompt() {
+        let agent = AgentSummary {
+            name: "child".to_string(),
+            role: AgentRole::Child,
+            repo_name: Some("repo".to_string()),
+            cwd: "F:\\work\\github\\hackman\\guardpro_factory".to_string(),
+            prompt_path: None,
+            thread_id: None,
+            current_session_id: None,
+            state: AgentSessionState::Idle,
+            current_task_id: None,
+            last_output_at: None,
+            last_heartbeat_at: None,
+        };
+
+        let command = build_codex_round_command(&agent, Some("schema.json"));
+        let args = command
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+
+        assert!(args.contains(&"--sandbox".to_string()));
+        assert!(args.contains(&"workspace-write".to_string()));
+        assert!(args.contains(&"-a".to_string()));
+        assert!(args.contains(&"never".to_string()));
+        assert!(args.contains(&"-".to_string()));
+        assert!(args.contains(&"--output-schema".to_string()));
     }
 
     #[test]

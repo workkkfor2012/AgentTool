@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -781,7 +782,7 @@ async fn run_agent_round(
 
     set_agent_runtime_state(shared, agent_name, AgentSessionState::Busy).await?;
 
-    let prompt = compose_agent_round_prompt(&agent, prompt);
+    let prompt = compose_agent_round_prompt(&agent, prompt)?;
     let execution = execute_codex_round(shared, &agent, &prompt, None).await;
 
     match execution {
@@ -1079,7 +1080,7 @@ async fn run_task_round(shared: &AppShared, task_id: &str) -> Result<ControlResp
     )
     .await?;
 
-    let prompt = compose_task_prompt(&agent, &task);
+    let prompt = compose_task_prompt(&agent, &task)?;
     let schema_path = shared
         .config
         .root_dir
@@ -1904,7 +1905,7 @@ fn display_agent_context_path(agent: &AgentSummary, path: &Path) -> String {
         .unwrap_or_else(|_| path.to_string_lossy().to_string())
 }
 
-fn existing_agent_context_files(agent: &AgentSummary) -> Vec<String> {
+fn existing_agent_context_files(agent: &AgentSummary) -> Vec<PathBuf> {
     let mut files = Vec::new();
     let mut seen = HashSet::new();
 
@@ -1912,8 +1913,8 @@ fn existing_agent_context_files(agent: &AgentSummary) -> Vec<String> {
         let prompt_path = PathBuf::from(prompt_path);
         if prompt_path.is_file() {
             let display = display_agent_context_path(agent, &prompt_path);
-            if seen.insert(display.clone()) {
-                files.push(display);
+            if seen.insert(display) {
+                files.push(prompt_path);
             }
         }
     }
@@ -1922,8 +1923,8 @@ fn existing_agent_context_files(agent: &AgentSummary) -> Vec<String> {
         let path = Path::new(&agent.cwd).join(file_name);
         if path.is_file() {
             let display = display_agent_context_path(agent, &path);
-            if seen.insert(display.clone()) {
-                files.push(display);
+            if seen.insert(display) {
+                files.push(path);
             }
         }
     }
@@ -1931,7 +1932,7 @@ fn existing_agent_context_files(agent: &AgentSummary) -> Vec<String> {
     files
 }
 
-fn compose_agent_context_prompt(agent: &AgentSummary) -> String {
+fn compose_agent_context_prompt(agent: &AgentSummary) -> Result<String> {
     let context_files = existing_agent_context_files(agent);
     let missing_prompt_note = agent
         .prompt_path
@@ -1945,24 +1946,28 @@ fn compose_agent_context_prompt(agent: &AgentSummary) -> String {
         .unwrap_or_default();
 
     if context_files.is_empty() {
-        return format!(
+        return Ok(format!(
             "{missing_prompt_note}No agent-specific prompt file or context file was found automatically. Inspect the repository directly before acting.\n\n"
-        );
+        ));
     }
 
-    let files = context_files
-        .into_iter()
-        .map(|path| format!("- {path}\n"))
-        .collect::<String>();
-    format!(
-        "{missing_prompt_note}Before acting, read these repository files in order and treat them as the active role contract and local working context for this round:\n\
-{files}\n"
-    )
+    let mut blocks = String::new();
+    for path in context_files {
+        let display = display_agent_context_path(agent, &path);
+        let content = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read agent context file {}", path.display()))?;
+        blocks.push_str(&format!("File: {display}\n```md\n{content}\n```\n\n"));
+    }
+
+    Ok(format!(
+        "{missing_prompt_note}The following repo-local context files are already loaded for this round. Treat them as the active role contract and working context. Do not spend time re-reading them unless you need to validate a change on disk.\n\n\
+{blocks}"
+    ))
 }
 
-fn compose_agent_round_prompt(agent: &AgentSummary, request: &str) -> String {
-    let context_prompt = compose_agent_context_prompt(agent);
-    format!(
+fn compose_agent_round_prompt(agent: &AgentSummary, request: &str) -> Result<String> {
+    let context_prompt = compose_agent_context_prompt(agent)?;
+    Ok(format!(
         "You are operating as agent `{agent_name}` inside repository `{cwd}`.\n\
 Work only inside this repository unless the repo-local instructions explicitly tell you to inspect another local path.\n\
 \n\
@@ -1973,11 +1978,11 @@ Round request:\n\
         cwd = agent.cwd,
         context_prompt = context_prompt,
         request = request,
-    )
+    ))
 }
 
-fn compose_task_prompt(agent: &AgentSummary, task: &TaskSummary) -> String {
-    let context_prompt = compose_agent_context_prompt(agent);
+fn compose_task_prompt(agent: &AgentSummary, task: &TaskSummary) -> Result<String> {
+    let context_prompt = compose_agent_context_prompt(agent)?;
     let latest_child_context = if task.round_count == 0 {
         "- latest_child_round: none\n".to_string()
     } else {
@@ -2017,7 +2022,7 @@ fn compose_task_prompt(agent: &AgentSummary, task: &TaskSummary) -> String {
         "- latest_main_decision: none\n".to_string()
     };
 
-    format!(
+    Ok(format!(
         "You are executing one repository-scoped task as child agent `{agent_name}`. Work only inside the current repository and do not assume cross-repo facts.\n\
 \n\
 {context_prompt}\
@@ -2058,7 +2063,7 @@ Interpretation rules:\n\
         round_count = task.round_count,
         latest_child_context = latest_child_context,
         latest_decision_context = latest_decision_context,
-    )
+    ))
 }
 
 async fn maybe_auto_resolve_task(
@@ -3306,7 +3311,7 @@ mod tests {
         task.latest_decision_issued_by = Some("main".to_string());
         task.latest_decision_at = Some(Utc::now());
 
-        let prompt = compose_task_prompt(&sample_agent(), &task);
+        let prompt = compose_task_prompt(&sample_agent(), &task).expect("compose task prompt");
         assert!(prompt.contains("latest_child_round: 2"));
         assert!(prompt.contains("latest_child_summary: Need input"));
         assert!(prompt.contains("latest_main_decision_summary: Proceed with the new schema"));
@@ -3333,10 +3338,14 @@ mod tests {
                 .to_string(),
         );
 
-        let prompt = compose_agent_round_prompt(&agent, "Continue the assigned role.");
+        let prompt = compose_agent_round_prompt(&agent, "Continue the assigned role.")
+            .expect("compose agent round prompt");
         assert!(prompt.contains("SUBAGENT_PROMPT.md"));
         assert!(prompt.contains("work.md"));
         assert!(prompt.contains("latest_reply.md"));
+        assert!(prompt.contains("# role"));
+        assert!(prompt.contains("current work"));
+        assert!(prompt.contains("latest reply"));
         assert!(prompt.contains("Continue the assigned role."));
 
         fs::remove_dir_all(&temp_dir).expect("cleanup temp dir");
