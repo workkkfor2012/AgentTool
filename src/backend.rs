@@ -207,14 +207,14 @@ fn start_round_backend(request: BackendStartRequest) -> Result<BackendHandle> {
 
 pub fn build_codex_round_command(agent: &AgentSummary, output_schema: Option<&str>) -> Command {
     let mut command = preferred_codex_command();
-    command.args(["-a", "never"]);
-    if let Some(thread_id) = &agent.thread_id {
+    command.args(["-a", "never", "-s", "workspace-write"]);
+    let allow_resume = agent.thread_id.is_some() && output_schema.is_none();
+
+    if let Some(thread_id) = agent.thread_id.as_ref().filter(|_| allow_resume) {
         command.args([
             "exec",
             "resume",
             "--json",
-            "--sandbox",
-            "workspace-write",
             "--skip-git-repo-check",
             thread_id,
             "-",
@@ -223,8 +223,6 @@ pub fn build_codex_round_command(agent: &AgentSummary, output_schema: Option<&st
         command.args([
             "exec",
             "--json",
-            "--sandbox",
-            "workspace-write",
             "--skip-git-repo-check",
             "--cd",
             &agent.cwd,
@@ -422,12 +420,46 @@ mod tests {
             .map(|arg| arg.to_string_lossy().to_string())
             .collect::<Vec<_>>();
 
-        assert!(args.contains(&"--sandbox".to_string()));
-        assert!(args.contains(&"workspace-write".to_string()));
         assert!(args.contains(&"-a".to_string()));
         assert!(args.contains(&"never".to_string()));
+        assert!(args.contains(&"-s".to_string()));
+        assert!(args.contains(&"workspace-write".to_string()));
         assert!(args.contains(&"-".to_string()));
         assert!(args.contains(&"--output-schema".to_string()));
+        assert!(!args.contains(&"resume".to_string()));
+    }
+
+    #[test]
+    fn resume_is_only_used_for_schema_less_rounds() {
+        let agent = AgentSummary {
+            name: "child".to_string(),
+            role: AgentRole::Child,
+            repo_name: Some("repo".to_string()),
+            cwd: "F:\\work\\github\\hackman\\guardpro_factory".to_string(),
+            prompt_path: None,
+            thread_id: Some("thread-123".to_string()),
+            current_session_id: None,
+            state: AgentSessionState::Idle,
+            current_task_id: None,
+            last_output_at: None,
+            last_heartbeat_at: None,
+        };
+
+        let schema_command = build_codex_round_command(&agent, Some("schema.json"));
+        let schema_args = schema_command
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert!(!schema_args.contains(&"resume".to_string()));
+
+        let resume_command = build_codex_round_command(&agent, None);
+        let resume_args = resume_command
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert!(resume_args.contains(&"resume".to_string()));
     }
 
     #[test]
