@@ -13,6 +13,6 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let config = AppConfig::load()?;
+    let config = AppConfig::load_agentd()?;
     run_agentd(config).await
 }

@@ -1,3 +1,8 @@
 /target/
+/target_*/
 /data/
+/data_test*/
+*.db
+*.db-shm
+*.db-wal
 *.log

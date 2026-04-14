@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AgentTool Bootstrap Ready Payload",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "status",
+    "summary"
+  ],
+  "properties": {
+    "status": {
+      "type": "string",
+      "const": "ready"
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

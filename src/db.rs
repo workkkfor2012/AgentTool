@@ -5,8 +5,9 @@ use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::models::{
-    AgentRole, AgentSessionState, AgentSummary, CodexSessionStatus, DecisionSummary, SessionMode,
-    SessionSummary, StreamEventRecord, TaskState, TaskSummary,
+    AgentBootstrapState, AgentRole, AgentSessionState, AgentSummary, AppServerOwner,
+    BridgeConnectionState, BridgeMode, CodexSessionStatus, DecisionSummary, RuntimeEventRecord,
+    SessionMode, SessionSummary, StreamEventRecord, TaskState, TaskSummary, VisiblePaneKind,
 };
 
 pub struct Database {
@@ -36,11 +37,28 @@ impl Database {
                 cwd TEXT NOT NULL,
                 prompt_path TEXT,
                 thread_id TEXT,
+                app_server_url TEXT,
+                app_server_owner TEXT,
+                app_server_registered_at TEXT,
+                visible_pane_pid INTEGER,
+                visible_pane_kind TEXT,
+                visible_pane_registered_at TEXT,
                 current_session_id TEXT,
                 state TEXT NOT NULL,
+                bootstrap_state TEXT NOT NULL DEFAULT 'awaiting_init',
+                bootstrap_summary TEXT,
+                bootstrap_completed_at TEXT,
                 current_task_id TEXT,
                 last_output_at TEXT,
                 last_heartbeat_at TEXT,
+                bridge_state TEXT NOT NULL DEFAULT 'disconnected',
+                bridge_mode TEXT,
+                bridge_session_id TEXT,
+                bridge_connected_at TEXT,
+                bridge_last_seen_at TEXT,
+                bridge_last_delivery_id INTEGER NOT NULL DEFAULT 0,
+                bridge_last_ack_delivery_id INTEGER NOT NULL DEFAULT 0,
+                bridge_pending_delivery_count INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -63,6 +81,10 @@ impl Database {
                 to_agent TEXT NOT NULL,
                 title TEXT NOT NULL,
                 summary TEXT NOT NULL,
+                effort TEXT,
+                read_scope_json TEXT NOT NULL DEFAULT '[]',
+                write_scope_json TEXT NOT NULL DEFAULT '[]',
+                acceptance_json TEXT NOT NULL DEFAULT '[]',
                 auto_resolve_by TEXT,
                 auto_resolve_summary TEXT,
                 round_count INTEGER NOT NULL DEFAULT 0,
@@ -92,6 +114,27 @@ impl Database {
                 created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS runtime_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scope TEXT NOT NULL,
+                scope_id TEXT NOT NULL,
+                agent_name TEXT,
+                task_id TEXT,
+                session_id TEXT,
+                actor_name TEXT,
+                event_type TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                reason TEXT,
+                payload_json TEXT,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_runtime_events_agent_name ON runtime_events(agent_name, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_runtime_events_actor_name ON runtime_events(actor_name, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_runtime_events_task_id ON runtime_events(task_id, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_runtime_events_session_id ON runtime_events(session_id, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_runtime_events_scope ON runtime_events(scope, scope_id, id DESC);
+
             CREATE TABLE IF NOT EXISTS decisions (
                 id TEXT PRIMARY KEY,
                 task_id TEXT NOT NULL,
@@ -116,9 +159,50 @@ impl Database {
         )?;
         self.ensure_column("agents", "prompt_path", "TEXT")?;
         self.ensure_column("agents", "thread_id", "TEXT")?;
+        self.ensure_column("agents", "app_server_url", "TEXT")?;
+        self.ensure_column("agents", "app_server_owner", "TEXT")?;
+        self.ensure_column("agents", "app_server_registered_at", "TEXT")?;
+        self.ensure_column("agents", "visible_pane_pid", "INTEGER")?;
+        self.ensure_column("agents", "visible_pane_kind", "TEXT")?;
+        self.ensure_column("agents", "visible_pane_registered_at", "TEXT")?;
         self.ensure_column("agents", "current_session_id", "TEXT")?;
+        self.ensure_column(
+            "agents",
+            "bootstrap_state",
+            "TEXT NOT NULL DEFAULT 'awaiting_init'",
+        )?;
+        self.ensure_column("agents", "bootstrap_summary", "TEXT")?;
+        self.ensure_column("agents", "bootstrap_completed_at", "TEXT")?;
+        self.ensure_column(
+            "agents",
+            "bridge_state",
+            "TEXT NOT NULL DEFAULT 'disconnected'",
+        )?;
+        self.ensure_column("agents", "bridge_mode", "TEXT")?;
+        self.ensure_column("agents", "bridge_session_id", "TEXT")?;
+        self.ensure_column("agents", "bridge_connected_at", "TEXT")?;
+        self.ensure_column("agents", "bridge_last_seen_at", "TEXT")?;
+        self.ensure_column(
+            "agents",
+            "bridge_last_delivery_id",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        self.ensure_column(
+            "agents",
+            "bridge_last_ack_delivery_id",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        self.ensure_column(
+            "agents",
+            "bridge_pending_delivery_count",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
         self.ensure_column("tasks", "auto_resolve_by", "TEXT")?;
         self.ensure_column("tasks", "auto_resolve_summary", "TEXT")?;
+        self.ensure_column("tasks", "effort", "TEXT")?;
+        self.ensure_column("tasks", "read_scope_json", "TEXT NOT NULL DEFAULT '[]'")?;
+        self.ensure_column("tasks", "write_scope_json", "TEXT NOT NULL DEFAULT '[]'")?;
+        self.ensure_column("tasks", "acceptance_json", "TEXT NOT NULL DEFAULT '[]'")?;
         self.ensure_column("tasks", "round_count", "INTEGER NOT NULL DEFAULT 0")?;
         self.ensure_column("tasks", "latest_child_status", "TEXT")?;
         self.ensure_column("tasks", "latest_child_summary", "TEXT")?;
@@ -167,9 +251,9 @@ impl Database {
         self.conn.execute(
             r#"
             INSERT INTO agents (
-                id, name, role, repo_name, cwd, prompt_path, thread_id, current_session_id, state, current_task_id, last_output_at, last_heartbeat_at, created_at, updated_at
+                id, name, role, repo_name, cwd, prompt_path, thread_id, app_server_url, app_server_owner, app_server_registered_at, visible_pane_pid, visible_pane_kind, visible_pane_registered_at, current_session_id, state, bootstrap_state, bootstrap_summary, bootstrap_completed_at, current_task_id, last_output_at, last_heartbeat_at, bridge_state, bridge_mode, bridge_session_id, bridge_connected_at, bridge_last_seen_at, bridge_last_delivery_id, bridge_last_ack_delivery_id, bridge_pending_delivery_count, created_at, updated_at
             ) VALUES (
-                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31
             )
             ON CONFLICT(name) DO UPDATE SET
                 role = excluded.role,
@@ -177,11 +261,28 @@ impl Database {
                 cwd = excluded.cwd,
                 prompt_path = excluded.prompt_path,
                 thread_id = excluded.thread_id,
+                app_server_url = excluded.app_server_url,
+                app_server_owner = excluded.app_server_owner,
+                app_server_registered_at = excluded.app_server_registered_at,
+                visible_pane_pid = excluded.visible_pane_pid,
+                visible_pane_kind = excluded.visible_pane_kind,
+                visible_pane_registered_at = excluded.visible_pane_registered_at,
                 current_session_id = excluded.current_session_id,
                 state = excluded.state,
+                bootstrap_state = excluded.bootstrap_state,
+                bootstrap_summary = excluded.bootstrap_summary,
+                bootstrap_completed_at = excluded.bootstrap_completed_at,
                 current_task_id = excluded.current_task_id,
                 last_output_at = excluded.last_output_at,
                 last_heartbeat_at = excluded.last_heartbeat_at,
+                bridge_state = excluded.bridge_state,
+                bridge_mode = excluded.bridge_mode,
+                bridge_session_id = excluded.bridge_session_id,
+                bridge_connected_at = excluded.bridge_connected_at,
+                bridge_last_seen_at = excluded.bridge_last_seen_at,
+                bridge_last_delivery_id = excluded.bridge_last_delivery_id,
+                bridge_last_ack_delivery_id = excluded.bridge_last_ack_delivery_id,
+                bridge_pending_delivery_count = excluded.bridge_pending_delivery_count,
                 updated_at = excluded.updated_at
             "#,
             params![
@@ -192,11 +293,28 @@ impl Database {
                 agent.cwd,
                 agent.prompt_path,
                 agent.thread_id,
+                agent.app_server_url,
+                agent.app_server_owner.as_ref().map(serialize_app_server_owner),
+                agent.app_server_registered_at.map(|dt| dt.to_rfc3339()),
+                agent.visible_pane_pid.map(i64::from),
+                agent.visible_pane_kind.as_ref().map(serialize_visible_pane_kind),
+                agent.visible_pane_registered_at.map(|dt| dt.to_rfc3339()),
                 agent.current_session_id,
                 serialize_agent_state(&agent.state),
+                serialize_bootstrap_state(&agent.bootstrap_state),
+                agent.bootstrap_summary,
+                agent.bootstrap_completed_at.map(|dt| dt.to_rfc3339()),
                 agent.current_task_id,
                 agent.last_output_at.map(|dt| dt.to_rfc3339()),
                 agent.last_heartbeat_at.map(|dt| dt.to_rfc3339()),
+                serialize_bridge_state(&agent.bridge_state),
+                agent.bridge_mode.as_ref().map(serialize_bridge_mode),
+                agent.bridge_session_id,
+                agent.bridge_connected_at.map(|dt| dt.to_rfc3339()),
+                agent.bridge_last_seen_at.map(|dt| dt.to_rfc3339()),
+                i64::try_from(agent.bridge_last_delivery_id).unwrap_or(i64::MAX),
+                i64::try_from(agent.bridge_last_ack_delivery_id).unwrap_or(i64::MAX),
+                i64::from(agent.bridge_pending_delivery_count),
                 now,
                 now,
             ],
@@ -208,8 +326,8 @@ impl Database {
         self.conn.execute(
             r#"
             INSERT INTO tasks (
-                id, from_agent, to_agent, title, summary, auto_resolve_by, auto_resolve_summary, round_count, latest_child_status, latest_child_summary, latest_child_blocking, latest_child_topic, latest_child_details, latest_decision_id, latest_decision_summary, latest_decision_status, latest_decision_issued_by, latest_decision_at, state, created_at, updated_at, closed_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
+                id, from_agent, to_agent, title, summary, effort, read_scope_json, write_scope_json, acceptance_json, auto_resolve_by, auto_resolve_summary, round_count, latest_child_status, latest_child_summary, latest_child_blocking, latest_child_topic, latest_child_details, latest_decision_id, latest_decision_summary, latest_decision_status, latest_decision_issued_by, latest_decision_at, state, created_at, updated_at, closed_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)
             "#,
             params![
                 task.task_id,
@@ -217,6 +335,10 @@ impl Database {
                 task.to_agent,
                 task.title,
                 task.summary,
+                task.effort,
+                serialize_string_list(&task.read_scope),
+                serialize_string_list(&task.write_scope),
+                serialize_string_list(&task.acceptance),
                 task.auto_resolve_by,
                 task.auto_resolve_summary,
                 i64::from(task.round_count),
@@ -243,11 +365,15 @@ impl Database {
         self.conn.execute(
             r#"
             UPDATE tasks
-            SET round_count = ?2, latest_child_status = ?3, latest_child_summary = ?4, latest_child_blocking = ?5, latest_child_topic = ?6, latest_child_details = ?7, latest_decision_id = ?8, latest_decision_summary = ?9, latest_decision_status = ?10, latest_decision_issued_by = ?11, latest_decision_at = ?12, state = ?13, updated_at = ?14, closed_at = ?15
+            SET effort = ?2, read_scope_json = ?3, write_scope_json = ?4, acceptance_json = ?5, round_count = ?6, latest_child_status = ?7, latest_child_summary = ?8, latest_child_blocking = ?9, latest_child_topic = ?10, latest_child_details = ?11, latest_decision_id = ?12, latest_decision_summary = ?13, latest_decision_status = ?14, latest_decision_issued_by = ?15, latest_decision_at = ?16, state = ?17, updated_at = ?18, closed_at = ?19
             WHERE id = ?1
             "#,
             params![
                 task.task_id,
+                task.effort,
+                serialize_string_list(&task.read_scope),
+                serialize_string_list(&task.write_scope),
+                serialize_string_list(&task.acceptance),
                 i64::from(task.round_count),
                 task.latest_child_status,
                 task.latest_child_summary,
@@ -290,6 +416,56 @@ impl Database {
             ],
         )?;
         Ok(())
+    }
+
+    pub fn insert_runtime_event(
+        &self,
+        scope: &str,
+        scope_id: &str,
+        agent_name: Option<&str>,
+        task_id: Option<&str>,
+        session_id: Option<&str>,
+        actor_name: Option<&str>,
+        event_type: &str,
+        summary: &str,
+        reason: Option<&str>,
+        payload_json: Option<&str>,
+    ) -> Result<RuntimeEventRecord> {
+        let created_at = Utc::now();
+        self.conn.execute(
+            r#"
+            INSERT INTO runtime_events (
+                scope, scope_id, agent_name, task_id, session_id, actor_name, event_type, summary, reason, payload_json, created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            "#,
+            params![
+                scope,
+                scope_id,
+                agent_name,
+                task_id,
+                session_id,
+                actor_name,
+                event_type,
+                summary,
+                reason,
+                payload_json,
+                created_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(RuntimeEventRecord {
+            id: self.conn.last_insert_rowid(),
+            scope: scope.to_string(),
+            scope_id: scope_id.to_string(),
+            agent_name: agent_name.map(str::to_string),
+            task_id: task_id.map(str::to_string),
+            session_id: session_id.map(str::to_string),
+            actor_name: actor_name.map(str::to_string),
+            event_type: event_type.to_string(),
+            summary: summary.to_string(),
+            reason: reason.map(str::to_string),
+            payload_json: payload_json.map(str::to_string),
+            created_at,
+        })
     }
 
     pub fn insert_decision(&self, decision: &DecisionSummary, payload_json: &str) -> Result<()> {
@@ -392,13 +568,17 @@ impl Database {
     pub fn load_agents(&self) -> Result<Vec<AgentSummary>> {
         let mut stmt = self.conn.prepare(
             r#"
-            SELECT name, role, repo_name, cwd, prompt_path, thread_id, current_session_id, state, current_task_id, last_output_at, last_heartbeat_at
+            SELECT name, role, repo_name, cwd, prompt_path, thread_id, app_server_url, app_server_owner, app_server_registered_at, visible_pane_pid, visible_pane_kind, visible_pane_registered_at, current_session_id, state, bootstrap_state, bootstrap_summary, bootstrap_completed_at, current_task_id, last_output_at, last_heartbeat_at, bridge_state, bridge_mode, bridge_session_id, bridge_connected_at, bridge_last_seen_at, bridge_last_delivery_id, bridge_last_ack_delivery_id, bridge_pending_delivery_count
             FROM agents
             ORDER BY name ASC
             "#,
         )?;
 
         let rows = stmt.query_map([], |row| {
+            let visible_pane_pid: Option<i64> = row.get(9)?;
+            let bridge_last_delivery_id: i64 = row.get(25)?;
+            let bridge_last_ack_delivery_id: i64 = row.get(26)?;
+            let bridge_pending_delivery_count: i64 = row.get(27)?;
             Ok(AgentSummary {
                 name: row.get(0)?,
                 role: parse_role(row.get::<_, String>(1)?),
@@ -406,11 +586,28 @@ impl Database {
                 cwd: row.get(3)?,
                 prompt_path: row.get(4)?,
                 thread_id: row.get(5)?,
-                current_session_id: row.get(6)?,
-                state: parse_agent_state(row.get::<_, String>(7)?),
-                current_task_id: row.get(8)?,
-                last_output_at: parse_datetime(row.get(9)?),
-                last_heartbeat_at: parse_datetime(row.get(10)?),
+                app_server_url: row.get(6)?,
+                app_server_owner: row.get::<_, Option<String>>(7)?.map(parse_app_server_owner),
+                app_server_registered_at: parse_datetime(row.get(8)?),
+                visible_pane_pid: visible_pane_pid.and_then(|value| u32::try_from(value).ok()),
+                visible_pane_kind: row.get::<_, Option<String>>(10)?.map(parse_visible_pane_kind),
+                visible_pane_registered_at: parse_datetime(row.get(11)?),
+                current_session_id: row.get(12)?,
+                state: parse_agent_state(row.get::<_, String>(13)?),
+                bootstrap_state: parse_bootstrap_state(row.get::<_, String>(14)?),
+                bootstrap_summary: row.get(15)?,
+                bootstrap_completed_at: parse_datetime(row.get(16)?),
+                current_task_id: row.get(17)?,
+                last_output_at: parse_datetime(row.get(18)?),
+                last_heartbeat_at: parse_datetime(row.get(19)?),
+                bridge_state: parse_bridge_state(row.get::<_, String>(20)?),
+                bridge_mode: row.get::<_, Option<String>>(21)?.map(parse_bridge_mode),
+                bridge_session_id: row.get(22)?,
+                bridge_connected_at: parse_datetime(row.get(23)?),
+                bridge_last_seen_at: parse_datetime(row.get(24)?),
+                bridge_last_delivery_id: bridge_last_delivery_id.max(0) as u64,
+                bridge_last_ack_delivery_id: bridge_last_ack_delivery_id.max(0) as u64,
+                bridge_pending_delivery_count: bridge_pending_delivery_count.max(0) as u32,
             })
         })?;
 
@@ -489,7 +686,7 @@ impl Database {
     pub fn load_tasks(&self) -> Result<Vec<TaskSummary>> {
         let mut stmt = self.conn.prepare(
             r#"
-            SELECT id, from_agent, to_agent, title, summary, auto_resolve_by, auto_resolve_summary, round_count, latest_child_status, latest_child_summary, latest_child_blocking, latest_child_topic, latest_child_details, latest_decision_id, latest_decision_summary, latest_decision_status, latest_decision_issued_by, latest_decision_at, state, created_at, updated_at, closed_at
+            SELECT id, from_agent, to_agent, title, summary, effort, read_scope_json, write_scope_json, acceptance_json, auto_resolve_by, auto_resolve_summary, round_count, latest_child_status, latest_child_summary, latest_child_blocking, latest_child_topic, latest_child_details, latest_decision_id, latest_decision_summary, latest_decision_status, latest_decision_issued_by, latest_decision_at, state, created_at, updated_at, closed_at
             FROM tasks
             ORDER BY created_at ASC
             "#,
@@ -502,23 +699,27 @@ impl Database {
                 to_agent: row.get(2)?,
                 title: row.get(3)?,
                 summary: row.get(4)?,
-                auto_resolve_by: row.get(5)?,
-                auto_resolve_summary: row.get(6)?,
-                round_count: row.get::<_, i64>(7)?.max(0) as u32,
-                latest_child_status: row.get(8)?,
-                latest_child_summary: row.get(9)?,
-                latest_child_blocking: row.get(10)?,
-                latest_child_topic: row.get(11)?,
-                latest_child_details: row.get(12)?,
-                latest_decision_id: row.get(13)?,
-                latest_decision_summary: row.get(14)?,
-                latest_decision_status: row.get(15)?,
-                latest_decision_issued_by: row.get(16)?,
-                latest_decision_at: parse_datetime(row.get(17)?),
-                state: parse_task_state(row.get::<_, String>(18)?),
-                created_at: parse_required_datetime(row.get(19)?)?,
-                updated_at: parse_required_datetime(row.get(20)?)?,
-                closed_at: parse_datetime(row.get(21)?),
+                effort: row.get(5)?,
+                read_scope: deserialize_string_list(row.get(6)?),
+                write_scope: deserialize_string_list(row.get(7)?),
+                acceptance: deserialize_string_list(row.get(8)?),
+                auto_resolve_by: row.get(9)?,
+                auto_resolve_summary: row.get(10)?,
+                round_count: row.get::<_, i64>(11)?.max(0) as u32,
+                latest_child_status: row.get(12)?,
+                latest_child_summary: row.get(13)?,
+                latest_child_blocking: row.get(14)?,
+                latest_child_topic: row.get(15)?,
+                latest_child_details: row.get(16)?,
+                latest_decision_id: row.get(17)?,
+                latest_decision_summary: row.get(18)?,
+                latest_decision_status: row.get(19)?,
+                latest_decision_issued_by: row.get(20)?,
+                latest_decision_at: parse_datetime(row.get(21)?),
+                state: parse_task_state(row.get::<_, String>(22)?),
+                created_at: parse_required_datetime(row.get(23)?)?,
+                updated_at: parse_required_datetime(row.get(24)?)?,
+                closed_at: parse_datetime(row.get(25)?),
             })
         })?;
 
@@ -586,6 +787,161 @@ impl Database {
         Ok(events)
     }
 
+    pub fn load_runtime_events_for_agent(
+        &self,
+        agent_name: &str,
+        limit: usize,
+    ) -> Result<Vec<RuntimeEventRecord>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT id, scope, scope_id, agent_name, task_id, session_id, actor_name, event_type, summary, reason, payload_json, created_at
+            FROM runtime_events
+            WHERE (scope = 'agent' AND scope_id = ?1)
+               OR agent_name = ?1
+               OR actor_name = ?1
+            ORDER BY id DESC
+            LIMIT ?2
+            "#,
+        )?;
+        let rows = stmt.query_map(params![agent_name, limit as i64], |row| {
+            Ok(RuntimeEventRecord {
+                id: row.get(0)?,
+                scope: row.get(1)?,
+                scope_id: row.get(2)?,
+                agent_name: row.get(3)?,
+                task_id: row.get(4)?,
+                session_id: row.get(5)?,
+                actor_name: row.get(6)?,
+                event_type: row.get(7)?,
+                summary: row.get(8)?,
+                reason: row.get(9)?,
+                payload_json: row.get(10)?,
+                created_at: parse_required_datetime(row.get(11)?)?,
+            })
+        })?;
+
+        let mut events = Vec::new();
+        for row in rows {
+            events.push(row?);
+        }
+        events.reverse();
+        Ok(events)
+    }
+
+    pub fn load_runtime_events_for_task(
+        &self,
+        task_id: &str,
+        limit: usize,
+    ) -> Result<Vec<RuntimeEventRecord>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT id, scope, scope_id, agent_name, task_id, session_id, actor_name, event_type, summary, reason, payload_json, created_at
+            FROM runtime_events
+            WHERE (scope = 'task' AND scope_id = ?1)
+               OR task_id = ?1
+            ORDER BY id DESC
+            LIMIT ?2
+            "#,
+        )?;
+        let rows = stmt.query_map(params![task_id, limit as i64], |row| {
+            Ok(RuntimeEventRecord {
+                id: row.get(0)?,
+                scope: row.get(1)?,
+                scope_id: row.get(2)?,
+                agent_name: row.get(3)?,
+                task_id: row.get(4)?,
+                session_id: row.get(5)?,
+                actor_name: row.get(6)?,
+                event_type: row.get(7)?,
+                summary: row.get(8)?,
+                reason: row.get(9)?,
+                payload_json: row.get(10)?,
+                created_at: parse_required_datetime(row.get(11)?)?,
+            })
+        })?;
+
+        let mut events = Vec::new();
+        for row in rows {
+            events.push(row?);
+        }
+        events.reverse();
+        Ok(events)
+    }
+
+    pub fn load_runtime_events_for_session(
+        &self,
+        session_id: &str,
+        limit: usize,
+    ) -> Result<Vec<RuntimeEventRecord>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT id, scope, scope_id, agent_name, task_id, session_id, actor_name, event_type, summary, reason, payload_json, created_at
+            FROM runtime_events
+            WHERE (scope = 'session' AND scope_id = ?1)
+               OR session_id = ?1
+            ORDER BY id DESC
+            LIMIT ?2
+            "#,
+        )?;
+        let rows = stmt.query_map(params![session_id, limit as i64], |row| {
+            Ok(RuntimeEventRecord {
+                id: row.get(0)?,
+                scope: row.get(1)?,
+                scope_id: row.get(2)?,
+                agent_name: row.get(3)?,
+                task_id: row.get(4)?,
+                session_id: row.get(5)?,
+                actor_name: row.get(6)?,
+                event_type: row.get(7)?,
+                summary: row.get(8)?,
+                reason: row.get(9)?,
+                payload_json: row.get(10)?,
+                created_at: parse_required_datetime(row.get(11)?)?,
+            })
+        })?;
+
+        let mut events = Vec::new();
+        for row in rows {
+            events.push(row?);
+        }
+        events.reverse();
+        Ok(events)
+    }
+
+    pub fn load_recent_runtime_events(&self, limit: usize) -> Result<Vec<RuntimeEventRecord>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT id, scope, scope_id, agent_name, task_id, session_id, actor_name, event_type, summary, reason, payload_json, created_at
+            FROM runtime_events
+            ORDER BY id DESC
+            LIMIT ?1
+            "#,
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |row| {
+            Ok(RuntimeEventRecord {
+                id: row.get(0)?,
+                scope: row.get(1)?,
+                scope_id: row.get(2)?,
+                agent_name: row.get(3)?,
+                task_id: row.get(4)?,
+                session_id: row.get(5)?,
+                actor_name: row.get(6)?,
+                event_type: row.get(7)?,
+                summary: row.get(8)?,
+                reason: row.get(9)?,
+                payload_json: row.get(10)?,
+                created_at: parse_required_datetime(row.get(11)?)?,
+            })
+        })?;
+
+        let mut events = Vec::new();
+        for row in rows {
+            events.push(row?);
+        }
+        events.reverse();
+        Ok(events)
+    }
+
     pub fn agent_current_task(&self, agent_name: &str) -> Result<Option<String>> {
         let task = self
             .conn
@@ -624,6 +980,28 @@ impl Database {
         for task_id in task_ids {
             removed += self.conn.execute(
                 "DELETE FROM task_events WHERE task_id = ?1",
+                params![task_id],
+            )?;
+        }
+        Ok(removed)
+    }
+
+    pub fn delete_runtime_events_by_agent_names(&self, agent_names: &[String]) -> Result<usize> {
+        let mut removed = 0;
+        for agent_name in agent_names {
+            removed += self.conn.execute(
+                "DELETE FROM runtime_events WHERE agent_name = ?1 OR actor_name = ?1 OR (scope = 'agent' AND scope_id = ?1)",
+                params![agent_name],
+            )?;
+        }
+        Ok(removed)
+    }
+
+    pub fn delete_runtime_events_by_task_ids(&self, task_ids: &[String]) -> Result<usize> {
+        let mut removed = 0;
+        for task_id in task_ids {
+            removed += self.conn.execute(
+                "DELETE FROM runtime_events WHERE task_id = ?1 OR (scope = 'task' AND scope_id = ?1)",
                 params![task_id],
             )?;
         }
@@ -695,16 +1073,88 @@ fn parse_agent_state(state: String) -> AgentSessionState {
     }
 }
 
+fn serialize_bootstrap_state(state: &AgentBootstrapState) -> &'static str {
+    match state {
+        AgentBootstrapState::AwaitingInit => "awaiting_init",
+        AgentBootstrapState::Ready => "ready",
+    }
+}
+
+fn parse_bootstrap_state(state: String) -> AgentBootstrapState {
+    match state.as_str() {
+        "ready" => AgentBootstrapState::Ready,
+        _ => AgentBootstrapState::AwaitingInit,
+    }
+}
+
+fn serialize_bridge_state(state: &BridgeConnectionState) -> &'static str {
+    match state {
+        BridgeConnectionState::Disconnected => "disconnected",
+        BridgeConnectionState::Connected => "connected",
+    }
+}
+
+fn parse_bridge_state(state: String) -> BridgeConnectionState {
+    match state.as_str() {
+        "connected" => BridgeConnectionState::Connected,
+        _ => BridgeConnectionState::Disconnected,
+    }
+}
+
+fn serialize_bridge_mode(mode: &BridgeMode) -> &'static str {
+    match mode {
+        BridgeMode::Passive => "passive",
+        BridgeMode::Autorun => "autorun",
+    }
+}
+
+fn parse_bridge_mode(mode: String) -> BridgeMode {
+    match mode.as_str() {
+        "autorun" => BridgeMode::Autorun,
+        _ => BridgeMode::Passive,
+    }
+}
+
+fn serialize_app_server_owner(owner: &AppServerOwner) -> &'static str {
+    match owner {
+        AppServerOwner::Bridge => "bridge",
+        AppServerOwner::Daemon => "daemon",
+    }
+}
+
+fn parse_app_server_owner(owner: String) -> AppServerOwner {
+    match owner.as_str() {
+        "daemon" => AppServerOwner::Daemon,
+        _ => AppServerOwner::Bridge,
+    }
+}
+
+fn serialize_visible_pane_kind(kind: &VisiblePaneKind) -> &'static str {
+    match kind {
+        VisiblePaneKind::Shell => "shell",
+        VisiblePaneKind::View => "view",
+    }
+}
+
+fn parse_visible_pane_kind(kind: String) -> VisiblePaneKind {
+    match kind.as_str() {
+        "view" => VisiblePaneKind::View,
+        _ => VisiblePaneKind::Shell,
+    }
+}
+
 fn serialize_session_mode(mode: &SessionMode) -> &'static str {
     match mode {
         SessionMode::Round => "round",
         SessionMode::Pty => "pty",
+        SessionMode::AppServer => "app_server",
     }
 }
 
 fn parse_session_mode(mode: String) -> SessionMode {
     match mode.as_str() {
         "pty" => SessionMode::Pty,
+        "app_server" => SessionMode::AppServer,
         _ => SessionMode::Round,
     }
 }
@@ -761,6 +1211,16 @@ fn parse_datetime(value: Option<String>) -> Option<DateTime<Utc>> {
     value
         .and_then(|raw| DateTime::parse_from_rfc3339(&raw).ok())
         .map(|dt| dt.with_timezone(&Utc))
+}
+
+fn serialize_string_list(values: &[String]) -> String {
+    serde_json::to_string(values).unwrap_or_else(|_| "[]".to_string())
+}
+
+fn deserialize_string_list(value: Option<String>) -> Vec<String> {
+    value
+        .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
+        .unwrap_or_default()
 }
 
 fn parse_required_datetime(value: String) -> rusqlite::Result<DateTime<Utc>> {

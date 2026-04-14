@@ -36,15 +36,17 @@ SQLite is not the realtime transport.
 
 The dashboard does not use an HTTP data API. Runtime sync is WebSocket-only.
 
-Current endpoint:
+Current endpoint discovery:
 
-- `ws://127.0.0.1:7080/ws`
+- `agentd` binds `127.0.0.1:0` for both websocket and control sockets
+- the actual ports are written to `data/runtime_endpoint.json`
+- the dashboard websocket URL is therefore `ws://<runtime ws_addr>/ws`
 
 The dashboard itself is a local static file:
 
 - `dashboard/index.html`
 
-The dashboard is intentionally read-only in the current phase.
+The dashboard is now a lightweight control surface. In local use it is secondary to the visible panes; in remote use it becomes the primary control surface.
 
 ### 2.4 One child agent, one in-flight task
 
@@ -100,8 +102,10 @@ Responsibilities:
 - surface live communication state for open tasks between the main agent and child agents
 - render current agents, tasks, decisions, and sessions
 - show recent stream activity
-- provide read-only filters for active-only view, stderr hiding, and text search
-- provide a read-only inspector for linked runtime details
+- provide filters for active-only view, stderr hiding, and text search
+- provide inspector details for linked runtime details
+- allow one controlled round to a selected agent
+- allow the current agent to generate and dispatch one structured task to a target executor
 - reconnect automatically
 - request a fresh snapshot when connected
 
@@ -268,7 +272,7 @@ Current practical use:
 ## 11. Current limitations
 
 - No PTY-controlled long-lived Codex sessions yet
-- Dashboard remains intentionally read-only; it exposes filters and inspection only
+- Dashboard is intentionally lightweight; it is not a heavy visualization of model internals and not a full autonomous control plane
 - No richer policy engine beyond per-task auto resolution yet
 - History replay is not a current product goal; realtime communication state takes priority
 - Task cancellation is deliberately conservative and does not preempt a live Codex child process; stop the session first, then cancel or retry
@@ -284,4 +288,4 @@ Recommended next steps:
 1. add PTY-backed session management for visible Codex windows
 2. add main-agent to child-agent task dispatch built on top of current state machine
 3. observe the current per-task auto-resolution behavior before expanding it into a broader policy engine
-4. continue tightening dashboard inspection and runtime recovery without adding dashboard-side control actions
+4. continue tightening dashboard inspection and runtime recovery while keeping dashboard control lightweight

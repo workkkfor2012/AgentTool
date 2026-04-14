@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::models::{
-    AgentRoundResult, AgentSummary, CleanupSummary, DashboardSnapshot, DecisionSummary,
-    RepairSummary, TaskRoundPayload, TaskSummary,
+    AgentContextView, AgentRoundResult, AgentSummary, CleanupSummary, DashboardSnapshot,
+    DecisionSummary, RemoveAgentSummary, RepairSummary, RuntimeTraceView, TaskContextView,
+    TaskRoundPayload, TaskSummary,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -10,6 +11,12 @@ use crate::models::{
 pub enum ControlRequest {
     Ping,
     Snapshot,
+    Trace {
+        agent: Option<String>,
+        task_id: Option<String>,
+        session_id: Option<String>,
+        limit: usize,
+    },
     RegisterAgent {
         name: String,
         role: String,
@@ -27,8 +34,62 @@ pub enum ControlRequest {
     CleanupDemoData {
         requested_by: String,
     },
+    RemoveAgent {
+        agent: String,
+    },
     RepairRuntimeState {
         requested_by: String,
+    },
+    TouchAgent {
+        agent: String,
+    },
+    BeginAgentBootstrap {
+        agent: String,
+    },
+    MarkAgentReady {
+        agent: String,
+        summary: Option<String>,
+        thread_id: Option<String>,
+    },
+    SetAgentVisiblePane {
+        agent: String,
+        pid: Option<u32>,
+        kind: Option<String>,
+    },
+    SetAgentAppServer {
+        agent: String,
+        app_server_url: Option<String>,
+        owner: Option<String>,
+    },
+    AppendRuntimeEvent {
+        scope: String,
+        scope_id: String,
+        agent: Option<String>,
+        task_id: Option<String>,
+        session_id: Option<String>,
+        actor: Option<String>,
+        event_type: String,
+        summary: String,
+        reason: Option<String>,
+        payload_json: Option<String>,
+    },
+    EnsureManagedSession {
+        agent: String,
+        bootstrap_prompt: Option<String>,
+    },
+    AgentContext {
+        agent: String,
+    },
+    TaskContext {
+        task_id: String,
+    },
+    BeginVisibleTask {
+        agent: String,
+    },
+    SubmitVisibleTaskRound {
+        task_id: String,
+        agent: String,
+        payload: TaskRoundPayload,
     },
     CancelTask {
         task_id: String,
@@ -47,13 +108,24 @@ pub enum ControlRequest {
     StopAgentSession {
         agent: String,
     },
+    StopManagedSessions,
+    StopVisiblePanes,
     CreateTask {
         from_agent: String,
         to_agent: String,
         title: String,
         summary: String,
+        effort: Option<String>,
+        read_scope: Vec<String>,
+        write_scope: Vec<String>,
+        acceptance: Vec<String>,
         auto_resolve_by: Option<String>,
         auto_resolve_summary: Option<String>,
+    },
+    CreateTaskFromPrompt {
+        from_agent: String,
+        to_agent: String,
+        request: String,
     },
     AcceptTask {
         task_id: String,
@@ -107,8 +179,14 @@ pub enum ControlResponse {
     Snapshot {
         snapshot: DashboardSnapshot,
     },
+    Trace {
+        trace: RuntimeTraceView,
+    },
     Cleanup {
         summary: CleanupSummary,
+    },
+    RemoveAgent {
+        summary: RemoveAgentSummary,
     },
     Repair {
         summary: RepairSummary,
@@ -122,12 +200,23 @@ pub enum ControlResponse {
     Agent {
         agent: AgentSummary,
     },
+    AgentContext {
+        context: AgentContextView,
+    },
+    TaskContext {
+        context: TaskContextView,
+    },
     RoundResult {
         result: AgentRoundResult,
     },
     TaskRound {
         task: TaskSummary,
         result: AgentRoundResult,
+        payload: TaskRoundPayload,
+        decision: Option<DecisionSummary>,
+    },
+    VisibleTaskRound {
+        task: TaskSummary,
         payload: TaskRoundPayload,
         decision: Option<DecisionSummary>,
     },
